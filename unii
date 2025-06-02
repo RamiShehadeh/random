@@ -1,0 +1,555 @@
+Below is a structured, step-by-step approach to creating modular, professional (but not over-engineered) in-game UI windows in Unity. We’ll use the built-in uGUI system (Canvas / RectTransform / EventSystem) and build three reusable components:
+	1.	DraggableWindow – handles click-and-drag movement via the title bar.
+	2.	ResizableWindow – handles click-and-drag resizing via corner/edge handles.
+	3.	DockManager (optional) – defines dock zones and snaps windows into place.
+
+By the end, you’ll have a single “Window” prefab you can drop into any Canvas; it will be moveable, resizable, and (optionally) dockable.
+
+⸻
+
+1. UI Hierarchy and Prefab Setup
+	1.	Create a new Canvas (Screen Space – Overlay, if you don’t already have one).
+	2.	Inside the Canvas, create an empty GameObject called WindowRoot. Set its RectTransform to a reasonable default size (e.g. 400×300), and anchor/pivot to top-left (0,1) so it’s easier to position later.
+	3.	Under WindowRoot, create the following children:
+
+WindowRoot (RectTransform)
+├── Background (Image)
+├── TitleBar (Image)
+│   └── TitleText (TextMeshProUGUI or Text)
+├── ContentArea (Empty GameObject with RectTransform)
+└── ResizeHandles (Empty GameObject)
+    ├── Handle_Top (Image)
+    ├── Handle_Bottom (Image)
+    ├── Handle_Left (Image)
+    ├── Handle_Right (Image)
+    ├── Handle_TopLeft (Image)
+    ├── Handle_TopRight (Image)
+    ├── Handle_BottomLeft (Image)
+    └── Handle_BottomRight (Image)
+
+	•	Background: full‐sized panel (e.g. a 9-slice sprite).
+	•	TitleBar: a thin strip at the top (height ≈ 30px). This is what you grab to drag the window.
+	•	TitleText: child of TitleBar, to show the window’s title.
+	•	ContentArea: everything else lives here (fill remaining space).
+	•	ResizeHandles: eight small invisible/barely visible UI elements positioned at each edge/corner (we’ll attach drag logic to each).
+
+	4.	Configure anchors and pivots:
+	•	WindowRoot.RectTransform
+	•	Anchor Min: (0,1)
+	•	Anchor Max: (0,1)
+	•	Pivot: (0,1)
+	•	Size Delta: e.g. (400,300)
+	•	Background.RectTransform
+	•	Anchor Min: (0,0)
+	•	Anchor Max: (1,1)
+	•	Pivot: (0.5,0.5)
+	•	Offset Min: (0,0)
+	•	Offset Max: (0,0)
+	•	TitleBar.RectTransform
+	•	Anchor Min: (0,1)
+	•	Anchor Max: (1,1)
+	•	Pivot: (0.5,1)
+	•	Height: 30 (Offset Min (0, –30), Offset Max (0,0))
+	•	ContentArea.RectTransform
+	•	Anchor Min (0,0)
+	•	Anchor Max (1,1)
+	•	Pivot (0.5,0.5)
+	•	Give it top offset -30 so it’s below the title bar:
+	•	Offset Min (0,0)
+	•	Offset Max (0,-30)
+	•	For each Handle_*, set size (e.g. 10×10) and position at the appropriate edge or corner using anchors:
+	•	Handle_Top
+	•	Anchor Min (0,1), Anchor Max (1,1), Pivot (0.5,1), Height 10, Offset Min (0,-10), Offset Max (0,0)
+	•	Handle_Bottom
+	•	Anchor Min (0,0), Anchor Max (1,0), Pivot (0,0), Height 10, Offset Min (0,0), Offset Max (0,10)
+	•	Handle_Left
+	•	Anchor Min (0,0), Anchor Max (0,1), Pivot (0,0.5), Width 10, Offset Min (0,0), Offset Max (10,0)
+	•	Handle_Right
+	•	Anchor Min (1,0), Anchor Max (1,1), Pivot (1,0.5), Width 10, Offset Min (-10,0), Offset Max (0,0)
+	•	Handle_TopLeft
+	•	Anchor Min (0,1), Anchor Max (0,1), Pivot (0,1), Size (10,10), Offset Min (0,-10), Offset Max (10,0)
+	•	Handle_TopRight
+	•	Anchor Min (1,1), Anchor Max (1,1), Pivot (1,1), Size (10,10), Offset Min (-10,-10), Offset Max (0,0)
+	•	Handle_BottomLeft
+	•	Anchor Min (0,0), Anchor Max (0,0), Pivot (0,0), Size (10,10), Offset Min (0,0), Offset Max (10,10)
+	•	Handle_BottomRight
+	•	Anchor Min (1,0), Anchor Max (1,0), Pivot (1,0), Size (10,10), Offset Min (-10,0), Offset Max (0,10)
+You can optionally make handles partially transparent or invisible (Color α = 0.1) so players see some affordance for resizing.
+	5.	Convert WindowRoot into a Prefab (e.g. named UIPanel_Window).
+	•	Delete any scene instances, leaving just the prefab in your Project.
+	•	Whenever you need a window, drag UIPanel_Window into your Canvas.
+
+⸻
+
+2. Draggable Window (Click-and-Drag Movement)
+
+We’ll make the TitleBar respond to pointer events so that dragging it moves the entire window. Create a C# script called DraggableWindow.cs and attach it to WindowRoot.
+
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+[DisallowMultipleComponent]
+public class DraggableWindow : MonoBehaviour, IBeginDragHandler, IDragHandler, IEndDragHandler
+{
+    [Tooltip("Drag this Image (usually the title bar) to move the window.")]
+    [SerializeField] private RectTransform dragHandle;
+
+    private RectTransform windowRect;
+    private Canvas rootCanvas;
+    private Vector2 pointerOffset; // difference between pointer and window pivot position
+
+    private void Awake()
+    {
+        windowRect = GetComponent<RectTransform>();
+        // Find the root Canvas
+        rootCanvas = GetComponentInParent<Canvas>();
+        if (rootCanvas == null)
+        {
+            Debug.LogError($"{nameof(DraggableWindow)} must be placed beneath a Canvas.");
+        }
+        if (dragHandle == null)
+        {
+            Debug.LogError($"{nameof(DraggableWindow)} requires a reference to the drag handle.");
+        }
+    }
+
+    public void OnBeginDrag(PointerEventData eventData)
+    {
+        if (eventData.pointerPressRaycast.gameObject == dragHandle.gameObject ||
+            eventData.pointerPressRaycast.gameObject == dragHandle.GetChild(0).gameObject ||
+            eventData.pointerPressRaycast.gameObject == dragHandle.gameObject)
+        {
+            // Convert pointer to local space of the window RectTransform:
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                windowRect, eventData.position, eventData.pressEventCamera, out pointerOffset);
+        }
+        else
+        {
+            // Ignore drag if user didn't click on the actual handle
+            eventData.pointerDrag = null;
+        }
+    }
+
+    public void OnDrag(PointerEventData eventData)
+    {
+        if (windowRect == null || rootCanvas == null) return;
+
+        Vector2 localPointerPos;
+        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(
+            rootCanvas.transform as RectTransform,
+            eventData.position,
+            eventData.pressEventCamera,
+            out localPointerPos))
+        {
+            // Move window pivot so that pointerOffset stays consistent
+            windowRect.anchoredPosition = localPointerPos - pointerOffset;
+        }
+    }
+
+    public void OnEndDrag(PointerEventData eventData)
+    {
+        // Nothing special to do on end drag, but method must be present
+    }
+}
+
+Key points:
+	•	We require a dragHandle (TitleBar’s RectTransform).
+	•	In OnBeginDrag, we check if the pointer began on the dragHandle; if not, we cancel dragging by nulling pointerDrag.
+	•	We store the offset between the pointer and the window’s pivot so the window doesn’t “snap” its pivot to the pointer.
+	•	In OnDrag, we convert the screen point to Canvas local space and update windowRect.anchoredPosition.
+
+How to hook it up:
+	1.	Attach DraggableWindow.cs to WindowRoot.
+	2.	In the Inspector, assign the TitleBar RectTransform to the dragHandle field.
+
+Now you can click & drag the title bar to move the entire window.
+
+⸻
+
+3. Resizable Window (Click-and-Drag Resizing)
+
+We’ll give each corner/edge handle its own script (all can share one ResizableWindow.cs). This script implements IBeginDragHandler / IDragHandler on the handle and resizes the parent window accordingly.
+
+Create ResizableWindow.cs and attach it to each of the eight Handle_* GameObjects. In the Inspector, assign:
+	•	A reference to the parent window’s RectTransform (usually found via GetComponentInParent<RectTransform>()).
+	•	Which edges this handle controls (e.g. left/right/top/bottom booleans, or a single enum).
+
+Below is a generic implementation using an enum for handle type:
+
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+public enum ResizeDirection
+{
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight
+}
+
+[DisallowMultipleComponent]
+public class ResizableWindow : MonoBehaviour, IBeginDragHandler, IDragHandler
+{
+    [Tooltip("Reference to the RectTransform of the window to resize.")]
+    [SerializeField] private RectTransform windowRect;
+    [Tooltip("Which corner/edge this handle controls.")]
+    [SerializeField] private ResizeDirection direction;
+
+    private Canvas rootCanvas;
+    private Vector2 originalMousePosition;
+    private Vector2 originalWindowSize;
+    private Vector2 originalWindowPosition; // used when resizing from left or bottom
+
+    private void Awake()
+    {
+        if (windowRect == null)
+        {
+            windowRect = GetComponentInParent<RectTransform>();
+            if (windowRect == null)
+                Debug.LogError($"{nameof(ResizableWindow)}: could not find parent RectTransform.");
+        }
+
+        rootCanvas = GetComponentInParent<Canvas>();
+        if (rootCanvas == null)
+            Debug.LogError($"{nameof(ResizableWindow)} must be placed beneath a Canvas.");
+    }
+
+    public void OnBeginDrag(PointerEventData eventData)
+    {
+        // Record original state
+        RectTransformUtility.ScreenPointToLocalPointInRectangle(
+            rootCanvas.transform as RectTransform,
+            eventData.position,
+            eventData.pressEventCamera,
+            out originalMousePosition);
+
+        originalWindowSize = windowRect.sizeDelta;
+        originalWindowPosition = windowRect.anchoredPosition;
+    }
+
+    public void OnDrag(PointerEventData eventData)
+    {
+        Vector2 localMousePosition;
+        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                rootCanvas.transform as RectTransform,
+                eventData.position,
+                eventData.pressEventCamera,
+                out localMousePosition))
+            return;
+
+        Vector2 dif = localMousePosition - originalMousePosition;
+        Vector2 size = originalWindowSize;
+        Vector2 position = originalWindowPosition;
+
+        switch (direction)
+        {
+            case ResizeDirection.Top:
+                size.y = Mathf.Max(50, originalWindowSize.y + dif.y);
+                break;
+
+            case ResizeDirection.Bottom:
+                size.y = Mathf.Max(50, originalWindowSize.y - dif.y);
+                position.y = originalWindowPosition.y + dif.y * 0.5f;
+                break;
+
+            case ResizeDirection.Left:
+                size.x = Mathf.Max(50, originalWindowSize.x - dif.x);
+                position.x = originalWindowPosition.x + dif.x * 0.5f;
+                break;
+
+            case ResizeDirection.Right:
+                size.x = Mathf.Max(50, originalWindowSize.x + dif.x);
+                break;
+
+            case ResizeDirection.TopLeft:
+                // Combine top + left logic
+                size.y = Mathf.Max(50, originalWindowSize.y + dif.y);
+                size.x = Mathf.Max(50, originalWindowSize.x - dif.x);
+                position.y = originalWindowPosition.y + dif.y * 0.5f;
+                position.x = originalWindowPosition.x + dif.x * 0.5f;
+                break;
+
+            case ResizeDirection.TopRight:
+                size.y = Mathf.Max(50, originalWindowSize.y + dif.y);
+                size.x = Mathf.Max(50, originalWindowSize.x + dif.x);
+                position.y = originalWindowPosition.y + dif.y * 0.5f;
+                break;
+
+            case ResizeDirection.BottomLeft:
+                size.y = Mathf.Max(50, originalWindowSize.y - dif.y);
+                size.x = Mathf.Max(50, originalWindowSize.x - dif.x);
+                position.y = originalWindowPosition.y + dif.y * 0.5f;
+                position.x = originalWindowPosition.x + dif.x * 0.5f;
+                break;
+
+            case ResizeDirection.BottomRight:
+                size.y = Mathf.Max(50, originalWindowSize.y - dif.y);
+                size.x = Mathf.Max(50, originalWindowSize.x + dif.x);
+                position.y = originalWindowPosition.y + dif.y * 0.5f;
+                break;
+        }
+
+        windowRect.sizeDelta = size;
+        windowRect.anchoredPosition = position;
+    }
+}
+
+Explanation of key points:
+	•	We store the window’s original size (sizeDelta) and anchored position at OnBeginDrag.
+	•	On OnDrag, we compute how far the mouse has moved in local Canvas space (dif).
+	•	Depending on direction, we adjust sizeDelta and (if resizing from left/bottom) also shift the window’s anchored position so that the opposite edge “stays put.”
+	•	We clamp size to a minimum (e.g. 50×50) to prevent collapsing the window completely.
+
+How to hook up:
+	1.	Attach ResizableWindow.cs to each Handle_*.
+	2.	In each Inspector, assign the same windowRect (the parent WindowRoot RectTransform).
+	3.	Set the direction enum appropriately for each handle.
+
+At runtime, dragging any handle will resize the WindowRoot accordingly.
+
+⸻
+
+4. Docking (Snapping Into Predefined Zones)
+
+If you want the window to “snap” to predefined dock areas (e.g. left side, right side, top, bottom, full screen), create a simple DockManager that tracks “zones” (rectangles). When the user drops the window (on OnEndDrag), check if its current anchored position/size overlaps a zone or if its center lies within a zone, then snap to that zone’s RectTransform.
+
+Below is a minimal DockManager.cs and a simple “DockZone” component to mark dock targets. You can expand this to support animations, smaller/more fine-grained zones, or multi-window tabbing.
+
+DockZone.cs
+
+using UnityEngine;
+
+[DisallowMultipleComponent]
+public class DockZone : MonoBehaviour
+{
+    [Tooltip("If true, windows snapped here will fill this entire RectTransform.")]
+    public bool fillWholeZone = true;
+
+    // Expose the RectTransform on which windows will snap.
+    public RectTransform ZoneRect => GetComponent<RectTransform>();
+
+    private void Reset()
+    {
+        // Ensure there's a RectTransform
+        if (GetComponent<RectTransform>() == null)
+            gameObject.AddComponent<RectTransform>();
+    }
+}
+
+	•	Attach DockZone to any UI panel (under the same Canvas) that represents a docking region (e.g. left half, right half, top bar, bottom bar).
+	•	The fillWholeZone flag indicates we’ll make the window’s sizeDelta and anchoredPosition exactly match ZoneRect if snapped.
+
+DockManager.cs
+
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+[DisallowMultipleComponent]
+public class DockManager : MonoBehaviour, IEndDragHandler
+{
+    [Tooltip("All possible dock zones under this Canvas.")]
+    [SerializeField] private DockZone[] dockZones;
+
+    private DraggableWindow draggable;
+    private RectTransform windowRect;
+    private Canvas rootCanvas;
+
+    private void Awake()
+    {
+        rootCanvas = GetComponentInParent<Canvas>();
+        windowRect = GetComponent<RectTransform>();
+        draggable = GetComponent<DraggableWindow>();
+        if (dockZones.Length == 0)
+        {
+            Debug.LogWarning($"{nameof(DockManager)}: No dock zones assigned. Windows won't snap anywhere.");
+        }
+    }
+
+    public void OnEndDrag(PointerEventData eventData)
+    {
+        // Check each zone: if window center is within zone, snap it.
+        Vector3 worldCenter = windowRect.TransformPoint(windowRect.rect.center);
+        foreach (var zone in dockZones)
+        {
+            Vector3[] corners = new Vector3[4];
+            zone.ZoneRect.GetWorldCorners(corners);
+            Rect worldRect = new Rect(corners[0], corners[2] - corners[0]);
+
+            if (worldRect.Contains(worldCenter))
+            {
+                // Snap: convert zone’s rect to window local coordinates
+                Vector2 localPos;
+                RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                    rootCanvas.transform as RectTransform,
+                    RectTransformUtility.WorldToScreenPoint(null, corners[0]),
+                    null,
+                    out localPos);
+
+                Vector2 zoneSize = zone.ZoneRect.sizeDelta; 
+                Vector2 zoneAnchorPos = zone.ZoneRect.anchoredPosition;
+                
+                if (zone.fillWholeZone)
+                {
+                    windowRect.anchoredPosition = zoneAnchorPos;
+                    windowRect.sizeDelta = zoneSize;
+                }
+                else
+                {
+                    // Example: snap only position, keep size.
+                    windowRect.anchoredPosition = zoneAnchorPos;
+                }
+
+                return; // Snap only to first matched zone
+            }
+        }
+    }
+}
+
+Usage:
+	1.	Create one or more “dock areas” inside your Canvas (e.g. an empty UI panel anchored to left half of screen).
+	2.	Attach DockZone to each of these, and adjust RectTransform so it covers the region.
+	3.	In the Window prefab, attach DockManager to WindowRoot as well, and in Inspector assign all your DockZone references.
+	4.	Whenever the user “drops” the window (stops dragging), OnEndDrag will test if the window’s center lies within any DockZone (in world space). If so, it matches that zone’s anchored position/size.
+
+You can refine this logic (e.g. snap to grid, detect overlap percentage, animate transitions, allow undocking if dropped outside all zones, etc.), but the above gives a minimal docking system.
+
+⸻
+
+5. Bringing It All Together: “Window” Prefab
+
+Your final UIPanel_Window prefab will have:
+	•	WindowRoot (RectTransform, with all scripts attached)
+	•	Components on WindowRoot:
+	•	CanvasGroup (optional; to control interactivity or fading)
+	•	DraggableWindow (assign TitleBar)
+	•	DockManager (assign all DockZone references)
+	•	Background (Image, 9-slice for borders)
+	•	TitleBar (Image)
+	•	EventTrigger is not needed if you have DraggableWindow on parent and assign this RectTransform as dragHandle.
+	•	TitleText (TextMeshProUGUI/Text)
+	•	ContentArea (empty container for your actual UI content)
+	•	ResizeHandles (empty root for handles)
+	•	Eight children (Handle_Top, Handle_Bottom, etc.)
+	•	Each Handle_* has:
+	•	Rectangle (Image or raw GameObject with CanvasGroup) sized 10×10 or thin strip
+	•	ResizableWindow script attached (assign windowRect to the parent WindowRoot, set appropriate direction)
+
+Once that prefab is set up:
+	1.	Drop it into your scene (under a Canvas).
+	2.	Set its initial position via WindowRoot.anchoredPosition in Inspector or via code.
+	3.	Under ContentArea, add whatever UI controls (buttons, text, scrollviews, etc.) you need.
+
+Because it’s a prefab, you can duplicate multiple windows. Each has its own scripts, so they don’t interfere.
+
+⸻
+
+6. Example Code for a “SimpleWindow” GameObject
+
+Below is a quick reference for how the final hierarchy and components might look. (You can skip re-typing this if you already created the prefab above.)
+
+UIPanel_Window (RectTransform)
+│  – CanvasGroup [optional]
+│  – DraggableWindow (dragHandle = TitleBar)
+│  – DockManager (dockZones = [LeftZone, RightZone, TopZone, etc.])
+│  – Image (Background) – stretch 0,0 to 1,1 (Tint = light gray, 9-slice border)
+│  – RectTransform TitleBar
+│      – Image (TitleBar background, height = 30, anchors top)
+│      – TextMeshProUGUI “Window Title”
+│  – RectTransform ContentArea (anchors stretch with top offset = –30)
+│      – (Your custom UI content goes here)
+│  – RectTransform ResizeHandles (anchors stretch entire window)
+│      – Handle_Top   – Image (height=10) + ResizableWindow(direction=Top)
+│      – Handle_Bottom – Image (height=10) + ResizableWindow(direction=Bottom)
+│      – Handle_Left  – Image (width=10)  + ResizableWindow(direction=Left)
+│      – Handle_Right – Image (width=10)  + ResizableWindow(direction=Right)
+│      – Handle_TopLeft    – Image (10×10) + ResizableWindow(direction=TopLeft)
+│      – Handle_TopRight   – Image (10×10) + ResizableWindow(direction=TopRight)
+│      – Handle_BottomLeft – Image (10×10) + ResizableWindow(direction=BottomLeft)
+│      – Handle_BottomRight – Image (10×10) + ResizableWindow(direction=BottomRight)
+
+	•	Make each handle’s Image have Color(1,1,1,0) or a subtle semi-transparent border so players know where to grab.
+	•	Ensure each handle’s Raycast Target is enabled so it receives pointer events.
+
+⸻
+
+7. Tips for Modularity & Professionalism
+	1.	Separation of Concerns
+	•	Keep movement logic purely in DraggableWindow.
+	•	Keep resizing logic purely in ResizableWindow.
+	•	Keep docking logic purely in DockManager / DockZone.
+	•	Your main “Window” prefab simply wires these together—in the future, you can swap out or extend behaviors (e.g., add a “Minimize” or “Close” button) without changing drag/resize code.
+	2.	Interfaces & Events
+	•	If you need other systems to react when a window opens/closes/docks, expose public C# events (e.g. public event Action OnWindowClosed;).
+	•	Consider creating an IWindow interface if you have different window types (e.g. simple panel vs. sub-dialog vs. floating tooltip).
+	3.	Lean on Unity’s Layouts
+	•	Inside ContentArea, you can drop in standard UI elements (VerticalLayoutGroup, ScrollRect, etc.). This keeps your window code focused exclusively on movement/resizing, not content layout.
+	4.	Use a CanvasGroup
+	•	If you want to temporarily disable interaction when dragging (e.g. prevent button clicks inside while dragging), toggle CanvasGroup.blocksRaycasts = false in OnBeginDrag and restore it in OnEndDrag.
+	5.	Minimum/Maximum Size
+	•	The example clamps to a 50×50 minimum. If you need a maximum (e.g. not to exceed screen size), in OnDrag clamp size further:
+
+size.x = Mathf.Clamp(size.x, minWidth, maxWidth);
+size.y = Mathf.Clamp(size.y, minHeight, maxHeight);
+
+
+	6.	Snap-to Grid (Optional)
+	•	When implementing docking, you could also snap to an invisible grid. In OnEndDrag, after computing the new anchoredPosition, you might do:
+
+var gridSize = 20f;
+float snappedX = Mathf.Round(windowRect.anchoredPosition.x / gridSize) * gridSize;
+float snappedY = Mathf.Round(windowRect.anchoredPosition.y / gridSize) * gridSize;
+windowRect.anchoredPosition = new Vector2(snappedX, snappedY);
+
+
+	7.	Z-Order Management
+	•	You’ll probably want the clicked window to come to front. In OnBeginDrag of DraggableWindow, you can do:
+
+windowRect.SetAsLastSibling();
+
+This pushes the window to the top of the Canvas’s draw order.
+
+	8.	Customization via Inspector
+	•	Expose colors, minimum size, snapping thresholds, and reference to an optional “close button” in your DraggableWindow or a separate WindowControls script.
+
+⸻
+
+8. Usage Example in Code
+
+If you want to spawn a window at runtime, you can keep a reference to the prefab and then:
+
+public class WindowSpawner : MonoBehaviour
+{
+    [SerializeField] private GameObject windowPrefab;
+    [SerializeField] private Transform uiCanvasTransform; // assign your Canvas transform
+
+    public void OpenNewWindow(Vector2 anchoredPosition, string titleText)
+    {
+        var newWindowGO = Instantiate(windowPrefab, uiCanvasTransform);
+        var rt = newWindowGO.GetComponent<RectTransform>();
+        rt.anchoredPosition = anchoredPosition;
+
+        // Optionally set the title
+        var titleComponent = newWindowGO.transform.Find("TitleBar/TitleText")
+                              .GetComponent<TMPro.TextMeshProUGUI>();
+        if (titleComponent != null)
+            titleComponent.text = titleText;
+    }
+}
+
+	•	Assign windowPrefab to your UIPanel_Window prefab.
+	•	Call OpenNewWindow from a button or another script, passing where on the screen (in Canvas coordinates) you want it to appear.
+
+⸻
+
+9. Summary
+	•	UI Hierarchy: a root RectTransform with Background, TitleBar, ContentArea, and ResizeHandles.
+	•	DraggableWindow: implements IBeginDrag / IDrag / IEndDrag and moves the window when dragging its TitleBar.
+	•	ResizableWindow: one script per handle that resizes its parent window in the appropriate direction(s).
+	•	DockManager (optional): snaps the window into predefined DockZones on OnEndDrag.
+	•	Prefab: pack it all into a single UIPanel_Window prefab for reuse.
+
+This approach keeps movement, resizing, and docking completely modular—each feature lives in its own component. You can then drop UIPanel_Window into any Canvas, hook up its references once, and immediately have a moveable, resizable, dockable window. Finally, add your own UI content under ContentArea, and your windows feel professional and polished without unnecessary complexity.
