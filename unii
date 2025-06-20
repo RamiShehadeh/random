@@ -1,3 +1,145 @@
+public void OnDrag(PointerEventData e)
+{
+    // 1) Window move
+    if (draggingWindow)
+    {
+        Vector2 localCursor;
+        RectTransformUtility.ScreenPointToLocalPointInRectangle(
+            rect.parent as RectTransform,
+            e.position,
+            e.pressEventCamera,
+            out localCursor);
+        rect.anchoredPosition = localCursor - pointerStartLocal;
+        return;
+    }
+
+    // 2) Resize
+    if (resizeDir == ResizeDir.None)
+        return;
+
+    // get pointer delta in window-local space
+    RectTransformUtility.ScreenPointToLocalPointInRectangle(
+        rect, e.position, e.pressEventCamera, out Vector2 pointerLocal);
+    Vector2 delta = pointerLocal - pointerStartLocal;
+
+    // start from original values
+    Vector2 newSize = originalSize;
+    Vector2 newPos  = originalPos;
+
+    switch (resizeDir)
+    {
+        case ResizeDir.Left:
+        {
+            // invert delta.x so dragging left grows, right shrinks
+            float dx       = -delta.x;
+            float sizeX    = Mathf.Max(minWidth, originalSize.x + dx);
+            float appliedX = sizeX - originalSize.x;
+            newSize.x      = sizeX;
+            newPos.x       = originalPos.x + appliedX * 0.5f;
+            break;
+        }
+
+        case ResizeDir.Right:
+        {
+            float dx       = delta.x;
+            float sizeX    = Mathf.Max(minWidth, originalSize.x + dx);
+            float appliedX = sizeX - originalSize.x;
+            newSize.x      = sizeX;
+            newPos.x       = originalPos.x + appliedX * 0.5f;
+            break;
+        }
+
+        case ResizeDir.Top:
+        {
+            float dy       = delta.y;
+            float sizeY    = Mathf.Max(minHeight, originalSize.y + dy);
+            float appliedY = sizeY - originalSize.y;
+            newSize.y      = sizeY;
+            newPos.y       = originalPos.y + appliedY * 0.5f;
+            break;
+        }
+
+        case ResizeDir.Bottom:
+        {
+            // invert delta.y so dragging down grows, up shrinks
+            float dy       = -delta.y;
+            float sizeY    = Mathf.Max(minHeight, originalSize.y + dy);
+            float appliedY = sizeY - originalSize.y;
+            newSize.y      = sizeY;
+            newPos.y       = originalPos.y + appliedY * 0.5f;
+            break;
+        }
+
+        case ResizeDir.TopLeft:
+        {
+            float dx       = -delta.x;
+            float dy       =  delta.y;
+            float sizeX    = Mathf.Max(minWidth,  originalSize.x + dx);
+            float sizeY    = Mathf.Max(minHeight, originalSize.y + dy);
+            float appliedX = sizeX - originalSize.x;
+            float appliedY = sizeY - originalSize.y;
+            newSize = new Vector2(sizeX, sizeY);
+            newPos  = new Vector2(
+                originalPos.x + appliedX * 0.5f,
+                originalPos.y + appliedY * 0.5f
+            );
+            break;
+        }
+
+        case ResizeDir.TopRight:
+        {
+            float dx       =  delta.x;
+            float dy       =  delta.y;
+            float sizeX    = Mathf.Max(minWidth,  originalSize.x + dx);
+            float sizeY    = Mathf.Max(minHeight, originalSize.y + dy);
+            float appliedX = sizeX - originalSize.x;
+            float appliedY = sizeY - originalSize.y;
+            newSize = new Vector2(sizeX, sizeY);
+            newPos  = new Vector2(
+                originalPos.x + appliedX * 0.5f,
+                originalPos.y + appliedY * 0.5f
+            );
+            break;
+        }
+
+        case ResizeDir.BottomLeft:
+        {
+            float dx       = -delta.x;
+            float dy       = -delta.y;
+            float sizeX    = Mathf.Max(minWidth,  originalSize.x + dx);
+            float sizeY    = Mathf.Max(minHeight, originalSize.y + dy);
+            float appliedX = sizeX - originalSize.x;
+            float appliedY = sizeY - originalSize.y;
+            newSize = new Vector2(sizeX, sizeY);
+            newPos  = new Vector2(
+                originalPos.x + appliedX * 0.5f,
+                originalPos.y + appliedY * 0.5f
+            );
+            break;
+        }
+
+        case ResizeDir.BottomRight:
+        {
+            float dx       =  delta.x;
+            float dy       = -delta.y;
+            float sizeX    = Mathf.Max(minWidth,  originalSize.x + dx);
+            float sizeY    = Mathf.Max(minHeight, originalSize.y + dy);
+            float appliedX = sizeX - originalSize.x;
+            float appliedY = sizeY - originalSize.y;
+            newSize = new Vector2(sizeX, sizeY);
+            newPos  = new Vector2(
+                originalPos.x + appliedX * 0.5f,
+                originalPos.y + appliedY * 0.5f
+            );
+            break;
+        }
+    }
+
+    // apply final
+    rect.sizeDelta       = newSize;
+    rect.anchoredPosition = newPos;
+}
+---------
 Below is a structured, step-by-step approach to creating modular, professional (but not over-engineered) in-game UI windows in Unity. We’ll use the built-in uGUI system (Canvas / RectTransform / EventSystem) and build three reusable components:
 	1.	DraggableWindow – handles click-and-drag movement via the title bar.
 	2.	ResizableWindow – handles click-and-drag resizing via corner/edge handles.
