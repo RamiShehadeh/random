@@ -553,3 +553,154 @@ public class WindowSpawner : MonoBehaviour
 	•	Prefab: pack it all into a single UIPanel_Window prefab for reuse.
 
 This approach keeps movement, resizing, and docking completely modular—each feature lives in its own component. You can then drop UIPanel_Window into any Canvas, hook up its references once, and immediately have a moveable, resizable, dockable window. Finally, add your own UI content under ContentArea, and your windows feel professional and polished without unnecessary complexity.
+
+
+
+aaaa
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+namespace DockableUI
+{
+    [RequireComponent(typeof(CanvasGroup))]
+    public class DockableWindow : MonoBehaviour,
+        IPointerDownHandler, IBeginDragHandler, IDragHandler, IEndDragHandler
+    {
+        [Header("Resize Handles (assign RectTransforms)")]
+        public RectTransform topLeftHandle;
+        public RectTransform topHandle;
+        public RectTransform topRightHandle;
+        public RectTransform rightHandle;
+        public RectTransform bottomRightHandle;
+        public RectTransform bottomHandle;
+        public RectTransform bottomLeftHandle;
+        public RectTransform leftHandle;
+
+        [Header("Size Constraints")]
+        public float minWidth = 100;
+        public float minHeight = 100;
+
+        // … your existing header drag fields here …
+
+        // New fields for resizing:
+        enum ResizeDir { None, Top, Bottom, Left, Right, TopLeft, TopRight, BottomLeft, BottomRight }
+        private ResizeDir resizeDir = ResizeDir.None;
+        private Vector2 originalSize;
+        private Vector2 originalPos;
+        private Vector2 pointerStartLocal;
+        private RectTransform rect;
+        private CanvasGroup canvasGroup;
+
+        void Awake()
+        {
+            rect = GetComponent<RectTransform>();
+            canvasGroup = GetComponent<CanvasGroup>();
+            // … your existing Awake code …
+        }
+
+        public void OnBeginDrag(PointerEventData e)
+        {
+            // --- detect header dragging first (your existing logic) ---
+            // if header, set dragging = true; return;
+
+            // --- otherwise, detect resize handle ---
+            if (IsOverHandle(bottomRightHandle, e)) BeginResize(ResizeDir.BottomRight, e);
+            else if (IsOverHandle(bottomLeftHandle, e))   BeginResize(ResizeDir.BottomLeft,  e);
+            else if (IsOverHandle(topRightHandle, e))    BeginResize(ResizeDir.TopRight,    e);
+            else if (IsOverHandle(topLeftHandle, e))     BeginResize(ResizeDir.TopLeft,     e);
+            else if (IsOverHandle(rightHandle, e))       BeginResize(ResizeDir.Right,       e);
+            else if (IsOverHandle(leftHandle, e))        BeginResize(ResizeDir.Left,        e);
+            else if (IsOverHandle(topHandle, e))         BeginResize(ResizeDir.Top,         e);
+            else if (IsOverHandle(bottomHandle, e))      BeginResize(ResizeDir.Bottom,      e);
+        }
+
+        void BeginResize(ResizeDir dir, PointerEventData e)
+        {
+            resizeDir = dir;
+            canvasGroup.blocksRaycasts = false;
+
+            // record original
+            originalSize = rect.sizeDelta;
+            originalPos = rect.anchoredPosition;
+
+            // record pointer starting local-space position
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                rect, e.position, e.pressEventCamera, out pointerStartLocal);
+        }
+
+        public void OnDrag(PointerEventData e)
+        {
+            // --- existing header-drag logic here ---
+
+            if (resizeDir != ResizeDir.None)
+            {
+                // current pointer local-pos
+                RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                    rect, e.position, e.pressEventCamera, out var pointerLocal);
+
+                Vector2 delta = pointerLocal - pointerStartLocal;
+                Vector2 newSize = originalSize;
+                Vector2 posOffset = Vector2.zero;
+                Vector2 pivot = rect.pivot; // usually (0.5,0.5)
+
+                // horizontal
+                if (resizeDir == ResizeDir.Right ||
+                    resizeDir == ResizeDir.TopRight ||
+                    resizeDir == ResizeDir.BottomRight)
+                {
+                    newSize.x = Mathf.Max(minWidth, originalSize.x + delta.x);
+                    posOffset.x = delta.x * pivot.x;
+                }
+                if (resizeDir == ResizeDir.Left ||
+                    resizeDir == ResizeDir.TopLeft ||
+                    resizeDir == ResizeDir.BottomLeft)
+                {
+                    newSize.x = Mathf.Max(minWidth, originalSize.x - delta.x);
+                    posOffset.x = delta.x * (pivot.x - 1);
+                }
+
+                // vertical
+                if (resizeDir == ResizeDir.Top ||
+                    resizeDir == ResizeDir.TopLeft ||
+                    resizeDir == ResizeDir.TopRight)
+                {
+                    newSize.y = Mathf.Max(minHeight, originalSize.y + delta.y);
+                    posOffset.y = delta.y * pivot.y;
+                }
+                if (resizeDir == ResizeDir.Bottom ||
+                    resizeDir == ResizeDir.BottomLeft ||
+                    resizeDir == ResizeDir.BottomRight)
+                {
+                    newSize.y = Mathf.Max(minHeight, originalSize.y - delta.y);
+                    posOffset.y = delta.y * (pivot.y - 1);
+                }
+
+                // apply
+                rect.sizeDelta = newSize;
+                rect.anchoredPosition = originalPos + posOffset;
+            }
+        }
+
+        public void OnEndDrag(PointerEventData e)
+        {
+            // --- existing end-drag header logic (re-enable raycasts) ---
+            if (resizeDir != ResizeDir.None)
+            {
+                resizeDir = ResizeDir.None;
+                canvasGroup.blocksRaycasts = true;
+            }
+        }
+
+        bool IsOverHandle(RectTransform handle, PointerEventData e)
+        {
+            return handle != null
+                && RectTransformUtility.RectangleContainsScreenPoint(handle, e.position, e.pressEventCamera);
+        }
+
+        public void OnPointerDown(PointerEventData e)
+        {
+            // bring to front as before...
+            transform.SetAsLastSibling();
+        }
+    }
+}
