@@ -704,3 +704,184 @@ namespace DockableUI
         }
     }
 }
+
+
+
+
+
+
+ZEZE
+
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+namespace DockableUI
+{
+    [RequireComponent(typeof(CanvasGroup))]
+    public class DockableWindow : MonoBehaviour,
+        IPointerDownHandler, IBeginDragHandler, IDragHandler, IEndDragHandler
+    {
+        [Header("Assign each handle (can be only corners or sides you want)")]
+        public RectTransform topLeftHandle;
+        public RectTransform topHandle;
+        public RectTransform topRightHandle;
+        public RectTransform rightHandle;
+        public RectTransform bottomRightHandle;
+        public RectTransform bottomHandle;
+        public RectTransform bottomLeftHandle;
+        public RectTransform leftHandle;
+
+        [Header("Header for moving the window")]
+        public RectTransform headerArea;
+
+        [Header("Size Constraints")]
+        public float minWidth = 100;
+        public float minHeight = 100;
+
+        // internals
+        private CanvasGroup cg;
+        private RectTransform rect;
+        private Vector2 originalSize;
+        private Vector2 originalPos;
+        private Vector2 pointerStartLocal;
+        private enum ResizeDir { None, Top, Bottom, Left, Right, TopLeft, TopRight, BottomLeft, BottomRight }
+        private ResizeDir resizeDir = ResizeDir.None;
+        private bool draggingWindow = false;
+
+        void Awake()
+        {
+            rect = GetComponent<RectTransform>();
+            cg = GetComponent<CanvasGroup>();
+        }
+
+        public void OnPointerDown(PointerEventData e)
+        {
+            // bring to front on any click
+            transform.SetAsLastSibling();
+        }
+
+        public void OnBeginDrag(PointerEventData e)
+        {
+            // 1) check handles first
+            if (TryBeginResize(ResizeDir.BottomLeft,   bottomLeftHandle,  e)) return;
+            if (TryBeginResize(ResizeDir.BottomRight,  bottomRightHandle, e)) return;
+            if (TryBeginResize(ResizeDir.TopLeft,      topLeftHandle,     e)) return;
+            if (TryBeginResize(ResizeDir.TopRight,     topRightHandle,    e)) return;
+            if (TryBeginResize(ResizeDir.Left,         leftHandle,        e)) return;
+            if (TryBeginResize(ResizeDir.Right,        rightHandle,       e)) return;
+            if (TryBeginResize(ResizeDir.Top,          topHandle,         e)) return;
+            if (TryBeginResize(ResizeDir.Bottom,       bottomHandle,      e)) return;
+
+            // 2) then header drag
+            if (RectTransformUtility.RectangleContainsScreenPoint(headerArea, e.position, e.pressEventCamera))
+            {
+                draggingWindow = true;
+                RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                    rect, e.position, e.pressEventCamera, out pointerStartLocal);
+                cg.blocksRaycasts = false;
+            }
+        }
+
+        bool TryBeginResize(ResizeDir dir, RectTransform handle, PointerEventData e)
+        {
+            if (handle != null &&
+                RectTransformUtility.RectangleContainsScreenPoint(handle, e.position, e.pressEventCamera))
+            {
+                resizeDir = dir;
+                cg.blocksRaycasts = false;
+                originalSize = rect.sizeDelta;
+                originalPos  = rect.anchoredPosition;
+                RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                    rect, e.position, e.pressEventCamera, out pointerStartLocal);
+                return true;
+            }
+            return false;
+        }
+
+        public void OnDrag(PointerEventData e)
+        {
+            if (draggingWindow)
+            {
+                // simple move
+                Vector2 localCursor;
+                RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                    (rect.parent as RectTransform), e.position, e.pressEventCamera, out localCursor);
+                rect.anchoredPosition = localCursor - pointerStartLocal;
+                return;
+            }
+
+            if (resizeDir == ResizeDir.None)
+                return;
+
+            // calculate how far the mouse moved in window-local space
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                rect, e.position, e.pressEventCamera, out Vector2 pointerLocal);
+            Vector2 delta = pointerLocal - pointerStartLocal;
+
+            Vector2 newSize = originalSize;
+            Vector2 newPos  = originalPos;
+
+            // Handle each direction explicitly:
+            switch (resizeDir)
+            {
+                case ResizeDir.Left:
+                    newSize.x = Mathf.Max(minWidth, originalSize.x - delta.x);
+                    newPos.x  = originalPos.x + delta.x * 0.5f;
+                    break;
+
+                case ResizeDir.Right:
+                    newSize.x = Mathf.Max(minWidth, originalSize.x + delta.x);
+                    newPos.x  = originalPos.x + delta.x * 0.5f;
+                    break;
+
+                case ResizeDir.Top:
+                    newSize.y = Mathf.Max(minHeight, originalSize.y + delta.y);
+                    newPos.y  = originalPos.y + delta.y * 0.5f;
+                    break;
+
+                case ResizeDir.Bottom:
+                    newSize.y = Mathf.Max(minHeight, originalSize.y - delta.y);
+                    newPos.y  = originalPos.y + delta.y * 0.5f;
+                    break;
+
+                case ResizeDir.TopLeft:
+                    newSize.x = Mathf.Max(minWidth,  originalSize.x - delta.x);
+                    newSize.y = Mathf.Max(minHeight, originalSize.y + delta.y);
+                    newPos.x  = originalPos.x + delta.x * 0.5f;
+                    newPos.y  = originalPos.y + delta.y * 0.5f;
+                    break;
+
+                case ResizeDir.TopRight:
+                    newSize.x = Mathf.Max(minWidth,  originalSize.x + delta.x);
+                    newSize.y = Mathf.Max(minHeight, originalSize.y + delta.y);
+                    newPos.x  = originalPos.x + delta.x * 0.5f;
+                    newPos.y  = originalPos.y + delta.y * 0.5f;
+                    break;
+
+                case ResizeDir.BottomLeft:
+                    newSize.x = Mathf.Max(minWidth,  originalSize.x - delta.x);
+                    newSize.y = Mathf.Max(minHeight, originalSize.y - delta.y);
+                    newPos.x  = originalPos.x + delta.x * 0.5f;
+                    newPos.y  = originalPos.y + delta.y * 0.5f;
+                    break;
+
+                case ResizeDir.BottomRight:
+                    newSize.x = Mathf.Max(minWidth,  originalSize.x + delta.x);
+                    newSize.y = Mathf.Max(minHeight, originalSize.y - delta.y);
+                    newPos.x  = originalPos.x + delta.x * 0.5f;
+                    newPos.y  = originalPos.y + delta.y * 0.5f;
+                    break;
+            }
+
+            rect.sizeDelta       = newSize;
+            rect.anchoredPosition = newPos;
+        }
+
+        public void OnEndDrag(PointerEventData e)
+        {
+            cg.blocksRaycasts = true;
+            draggingWindow = false;
+            resizeDir = ResizeDir.None;
+        }
+    }
+}
