@@ -17,6 +17,177 @@ public void OnDrag(PointerEventData e)
     if (resizeDir == ResizeDir.None)
         return;
 
+    // Raw pointer delta in window-local space
+    RectTransformUtility.ScreenPointToLocalPointInRectangle(
+        rect, e.position, e.pressEventCamera, out Vector2 pointerLocal);
+    Vector2 delta = pointerLocal - pointerStartLocal;
+
+    // Start from the original size & pos
+    Vector2 newSize = originalSize;
+    Vector2 newPos  = originalPos;
+
+    switch (resizeDir)
+    {
+        case ResizeDir.Left:
+        {
+            // delta.x < 0 → pulling left (grow); delta.x > 0 → pulling right (shrink)
+            float raw = delta.x;
+            float maxShrink = originalSize.x - minWidth;                // positive
+            // clamp so raw never > maxShrink (i.e. never shrink past min)
+            float clamped = Mathf.Min(raw, maxShrink);
+            newSize.x = originalSize.x - clamped;                       // subtracting positive raw shrinks
+            newPos.x  = originalPos.x + clamped * 0.5f;                 // move center half the change
+            break;
+        }
+
+        case ResizeDir.Right:
+        {
+            // delta.x > 0 → pulling right (grow); delta.x < 0 → pulling left (shrink)
+            float raw = delta.x;
+            float maxShrink = originalSize.x - minWidth;                // positive
+            // to shrink, raw must be >= –maxShrink
+            float clamped = Mathf.Max(raw, -maxShrink);
+            newSize.x = originalSize.x + clamped;
+            newPos.x  = originalPos.x + clamped * 0.5f;
+            break;
+        }
+
+        case ResizeDir.Top:
+        {
+            // delta.y > 0 → pulling up (grow); delta.y < 0 → pulling down (shrink)
+            float raw = delta.y;
+            float maxShrink = originalSize.y - minHeight;
+            float clamped = Mathf.Max(raw, -maxShrink);
+            newSize.y = originalSize.y + clamped;
+            newPos.y  = originalPos.y + clamped * 0.5f;
+            break;
+        }
+
+        case ResizeDir.Bottom:
+        {
+            // delta.y < 0 → pulling down (grow); delta.y > 0 → pulling up (shrink)
+            float raw = delta.y;
+            float maxShrink = originalSize.y - minHeight;
+            float clamped = Mathf.Min(raw, maxShrink);
+            newSize.y = originalSize.y - clamped;
+            newPos.y  = originalPos.y + clamped * 0.5f;
+            break;
+        }
+
+        case ResizeDir.TopLeft:
+        {
+            // X axis same as Left
+            float rawX      = delta.x;
+            float maxShrinkX = originalSize.x - minWidth;
+            float cX = Mathf.Min(rawX, maxShrinkX);
+            // Y axis same as Top
+            float rawY      = delta.y;
+            float maxShrinkY = originalSize.y - minHeight;
+            float cY = Mathf.Max(rawY, -maxShrinkY);
+
+            newSize = new Vector2(
+                originalSize.x - cX,
+                originalSize.y + cY
+            );
+            newPos  = new Vector2(
+                originalPos.x + cX * 0.5f,
+                originalPos.y + cY * 0.5f
+            );
+            break;
+        }
+
+        case ResizeDir.TopRight:
+        {
+            // X axis same as Right
+            float rawX      = delta.x;
+            float maxShrinkX = originalSize.x - minWidth;
+            float cX = Mathf.Max(rawX, -maxShrinkX);
+            // Y axis same as Top
+            float rawY      = delta.y;
+            float maxShrinkY = originalSize.y - minHeight;
+            float cY = Mathf.Max(rawY, -maxShrinkY);
+
+            newSize = new Vector2(
+                originalSize.x + cX,
+                originalSize.y + cY
+            );
+            newPos  = new Vector2(
+                originalPos.x + cX * 0.5f,
+                originalPos.y + cY * 0.5f
+            );
+            break;
+        }
+
+        case ResizeDir.BottomLeft:
+        {
+            // X axis same as Left
+            float rawX      = delta.x;
+            float maxShrinkX = originalSize.x - minWidth;
+            float cX = Mathf.Min(rawX, maxShrinkX);
+            // Y axis same as Bottom
+            float rawY      = delta.y;
+            float maxShrinkY = originalSize.y - minHeight;
+            float cY = Mathf.Min(rawY, maxShrinkY);
+
+            newSize = new Vector2(
+                originalSize.x - cX,
+                originalSize.y - cY
+            );
+            newPos  = new Vector2(
+                originalPos.x + cX * 0.5f,
+                originalPos.y + cY * 0.5f
+            );
+            break;
+        }
+
+        case ResizeDir.BottomRight:
+        {
+            // X axis same as Right
+            float rawX      = delta.x;
+            float maxShrinkX = originalSize.x - minWidth;
+            float cX = Mathf.Max(rawX, -maxShrinkX);
+            // Y axis same as Bottom
+            float rawY      = delta.y;
+            float maxShrinkY = originalSize.y - minHeight;
+            float cY = Mathf.Min(rawY, maxShrinkY);
+
+            newSize = new Vector2(
+                originalSize.x + cX,
+                originalSize.y - cY
+            );
+            newPos  = new Vector2(
+                originalPos.x + cX * 0.5f,
+                originalPos.y + cY * 0.5f
+            );
+            break;
+        }
+    }
+
+    // Apply the clamped result
+    rect.sizeDelta       = newSize;
+    rect.anchoredPosition = newPos;
+}
+
+---------
+public void OnDrag(PointerEventData e)
+{
+    // 1) Window move
+    if (draggingWindow)
+    {
+        Vector2 localCursor;
+        RectTransformUtility.ScreenPointToLocalPointInRectangle(
+            rect.parent as RectTransform,
+            e.position,
+            e.pressEventCamera,
+            out localCursor);
+        rect.anchoredPosition = localCursor - pointerStartLocal;
+        return;
+    }
+
+    // 2) Resize
+    if (resizeDir == ResizeDir.None)
+        return;
+
     // get pointer delta in window-local space
     RectTransformUtility.ScreenPointToLocalPointInRectangle(
         rect, e.position, e.pressEventCamera, out Vector2 pointerLocal);
