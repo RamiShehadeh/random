@@ -1,3 +1,261 @@
+using System.Collections.Generic;
+using UnityEngine;
+
+public class SimplePool<T> where T : Component
+{
+    readonly T prefab;
+    readonly Stack<T> cache = new Stack<T>();
+
+    public SimplePool(T prefab) { this.prefab = prefab; }
+
+    public T Get()
+    {
+        T inst = cache.Count > 0
+              ? cache.Pop()
+              : GameObject.Instantiate(prefab);
+        inst.gameObject.SetActive(true);
+        return inst;
+    }
+
+    /// <summary>
+    /// Deactivates & caches every direct child under parent
+    /// that has a T component.
+    /// </summary>
+    public void ReturnAllChildren(Transform parent)
+    {
+        foreach (Transform child in parent)
+        {
+            var comp = child.GetComponent<T>();
+            if (comp != null)
+                Return(comp);
+        }
+    }
+
+    void Return(T inst)
+    {
+        inst.gameObject.SetActive(false);
+        cache.Push(inst);
+    }
+}
+
+
+
+using UnityEngine;
+using UnityEngine.UI;
+using TMPro;
+
+public class TrackRowUI : MonoBehaviour
+{
+    [SerializeField] TextMeshProUGUI labelField;
+    [SerializeField] RectTransform    barContainer;  // should stretch to fill
+    [SerializeField] Image            eventBar;       // child of barContainer
+
+    VideoMetadata        meta;
+    TimelineUIController controller;
+
+    public void Initialize(VideoMetadata metadata, TimelineUIController ctl)
+    {
+        meta        = metadata;
+        controller  = ctl;
+        labelField.text   = metadata.feedName;
+        eventBar.color    = metadata.barColor;
+        UpdateBar();
+    }
+
+    /// <summary>
+    /// Positions & sizes the single colored bar
+    /// to span [startTime → endTime].
+    /// </summary>
+    public void UpdateBar()
+    {
+        float x0 = controller.TimeToOffset(meta.startTime);
+        float x1 = controller.TimeToOffset(meta.endTime);
+        float w  = x1 - x0;
+
+        var rt = eventBar.rectTransform;
+        rt.anchoredPosition = new Vector2(x0, 0);
+        rt.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, w);
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+using TMPro;
+
+public class TimelineUIController : MonoBehaviour
+{
+    [Header("Layout References")]
+    [SerializeField] RectTransform      contentRoot;      // → the scrollable content
+    [SerializeField] RectTransform      tracksContainer;  // → VerticalLayoutGroup parent of TrackRows
+    [SerializeField] RectTransform      tickContainer;    // → where tick‐marks & labels go
+    [SerializeField] GameObject         trackRowPrefab;   // → your TrackRowUI prefab
+    [SerializeField] Image              tickMarkPrefab;   // → 1px‐wide UI Image
+    [SerializeField] TextMeshProUGUI    tickLabelPrefab;  // → TMP label prefab
+
+    [Header("Playback UI")]
+    [SerializeField] RectTransform      scrubberLine;     // → thin vertical line
+    [SerializeField] ScrollRect         scrollRect;       // → for horizontal panning
+    [SerializeField] Slider             zoomSlider;       // → 0…1 controls zoom
+
+    [Header("Timeline Range")]
+    [SerializeField] DateTime           timelineStart = default;
+    [SerializeField] DateTime           timelineEnd   = default;
+
+    [Header("Zoom Settings")]
+    [SerializeField] float              minContentWidth = 1000f;
+    [SerializeField] float              maxContentWidth = 20000f;
+
+    [Header("Video Data")]
+    [SerializeField] List<VideoMetadata> videos = new List<VideoMetadata>();
+
+    // how many real seconds between ticks, adaptively chosen
+    static readonly double[] NiceIntervals = {
+        1, 5, 10, 30,
+        60, 5*60, 10*60, 30*60,
+        60*60, 2*60*60, 6*60*60, 12*60*60
+    };
+    const float targetPxPerTick = 80f;
+    double totalSecondsInWindow;
+    double lastInterval = -1;
+
+    SimplePool<Image>           tickPool;
+    SimplePool<TextMeshProUGUI> labelPool;
+
+    void Awake()
+    {
+        // compute our total span once
+        totalSecondsInWindow = (timelineEnd - timelineStart).TotalSeconds;
+
+        // init pools
+        tickPool  = new SimplePool<Image>(tickMarkPrefab);
+        labelPool = new SimplePool<TextMeshProUGUI>(tickLabelPrefab);
+
+        // spawn one row per video
+        foreach (var md in videos)
+        {
+            var go = Instantiate(trackRowPrefab, tracksContainer);
+            go.GetComponent<TrackRowUI>().Initialize(md, this);
+        }
+
+        // hook zoom & pan
+        zoomSlider.onValueChanged.AddListener(_ => OnZoomOrPan());
+        if (scrollRect != null)
+            scrollRect.onValueChanged.AddListener(_ => OnZoomOrPan());
+    }
+
+    void Start()
+    {
+        // initial layout
+        OnZoomOrPan();
+    }
+
+    void OnZoomOrPan()
+    {
+        // 1) resize content width
+        float w = Mathf.Lerp(minContentWidth, maxContentWidth, zoomSlider.value);
+        var d = contentRoot.sizeDelta;
+        d.x = w;
+        contentRoot.sizeDelta = d;
+
+        // 2) rebuild ticks if interval changed
+        RebuildTicks();
+
+        // 3) update every track‐row bar
+        foreach (var row in tracksContainer.GetComponentsInChildren<TrackRowUI>())
+            row.UpdateBar();
+    }
+
+    void RebuildTicks()
+    {
+        // determine px/sec
+        float pxW   = contentRoot.rect.width;
+        double pxPerSec = pxW / totalSecondsInWindow;
+        double desiredSec = targetPxPerTick / pxPerSec;
+
+        // pick the smallest “nice” >= desired
+        double chosen = NiceIntervals[NiceIntervals.Length - 1];
+        foreach (var iv in NiceIntervals)
+            if (iv >= desiredSec) { chosen = iv; break; }
+
+        if (Math.Abs(chosen - lastInterval) < 0.001) 
+            return;        // no change => skip
+
+        lastInterval = chosen;
+        GenerateTicks(chosen);
+    }
+
+    void GenerateTicks(double stepSec)
+    {
+        // clear old
+        tickPool.ReturnAllChildren(tickContainer);
+        labelPool.ReturnAllChildren(tickContainer);
+
+        // major‐tick every Nth tick
+        int majorEvery = stepSec >= 3600 ? 1   // every hr
+                          : stepSec >= 60  ? 5   // every 5 min
+                          : 10;                   // every 10 sec
+
+        DateTime t = timelineStart;
+        int idx = 0;
+        while (t <= timelineEnd)
+        {
+            float x = TimeToOffset(t);
+
+            // tick mark
+            var mk = tickPool.Get();
+            mk.rectTransform.SetParent(tickContainer, false);
+            mk.rectTransform.anchoredPosition = new Vector2(x, 0);
+            float h = (idx % majorEvery == 0) ? 20f : 10f;
+            mk.rectTransform.sizeDelta = new Vector2(1f, h);
+
+            // label on major
+            if (idx % majorEvery == 0)
+            {
+                var lb = labelPool.Get();
+                lb.rectTransform.SetParent(tickContainer, false);
+                lb.rectTransform.anchoredPosition = new Vector2(x + 2, -h - 4);
+                lb.text = FormatLabel(t, stepSec);
+            }
+
+            t = t.AddSeconds(stepSec);
+            idx++;
+        }
+    }
+
+    string FormatLabel(DateTime t, double step)
+    {
+        if (step >= 3600)       return t.ToString("HH:mm");
+        else if (step >= 60)    return t.ToString("HH:mm");
+        else                    return t.ToString("HH:mm:ss");
+    }
+
+    /// <summary>
+    /// Converts an absolute time within [start,end]
+    /// to an X‐offset in pixels inside contentRoot.
+    /// </summary>
+    public float TimeToOffset(DateTime time)
+    {
+        double secs = (time - timelineStart).TotalSeconds;
+        return (float)(secs / totalSecondsInWindow) * contentRoot.rect.width;
+    }
+
+    /// <summary>
+    /// Move the scrubber line to the playhead position
+    /// </summary>
+    public void SetScrubber(DateTime playhead)
+    {
+        var p = scrubberLine.anchoredPosition;
+        p.x = TimeToOffset(playhead);
+        scrubberLine.anchoredPosition = p;
+    }
+}
+
+
+-----------------
+
+
 public void OnDrag(PointerEventData e)
 {
     // 1) Window move
