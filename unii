@@ -1,3 +1,54 @@
+
+private void ZoomTimeline(float scrollDir)
+{
+    // 1) compute total span & zoom “amount”
+    var total  = (endTime - startTime).TotalSeconds;
+    var factor = zoomFactor;            // e.g. 0.1 for 10% per notch
+    var delta  = total * factor;        // seconds to grow/shrink
+
+    // 2) pick the pivot time
+    DateTime pivot = scrollDir > 0
+        ? GetTimeAtMousePosition()      // zoom-in: mouse
+        : startTime + (endTime - startTime) / 2; // zoom-out: center
+
+    // 3) figure out how much to shift each side
+    double before = (pivot - startTime).TotalSeconds;
+    double after  = (endTime   - pivot).TotalSeconds;
+    
+    // shrink
+    DateTime p0, p1;
+    if (scrollDir > 0)
+    {
+        // zoom in
+        p0 = pivot.AddSeconds(-before + (before * factor));
+        p1 = pivot.AddSeconds( after - (after   * factor));
+    }
+    else
+    {
+        // zoom out
+        p0 = pivot.AddSeconds(-before - (before * factor));
+        p1 = pivot.AddSeconds( after + (after   * factor));
+    }
+
+    // 4) clamp to your absolute day-bounds
+    if (p0 < minTimelineTime) p0 = minTimelineTime;
+    if (p1 > maxTimelineTime) p1 = maxTimelineTime;
+
+    // 5) enforce minimum span if you like
+    if ((p1 - p0).TotalSeconds < minZoomSeconds)
+        return;
+
+    // 6) apply
+    startTime = p0;
+    endTime   = p1;
+    SubmitNewTimelineBounds(p0, p1);
+    StartTimeInput.text = p0.ToString("HH:mm:ss");
+    EndTimeInput  .text = p1.ToString("HH:mm:ss");
+}
+
+
+--------
+
 using System.Collections.Generic;
 using UnityEngine;
 
