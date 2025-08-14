@@ -1,0 +1,443 @@
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.Events;
+using UnityEngine.UI;
+using DG.Tweening;
+
+namespace Toasts
+{
+    public enum NotificationCorner { TopRight, TopLeft, BottomRight, BottomLeft }
+    public enum NotificationStyle { Info, Success, Warning, Error, Neutral }
+
+    [Serializable]
+    public struct NotificationRequest
+    {
+        public string Title;
+        public string Message;
+        public Sprite Icon;
+        public float? Duration;                 // seconds; null => sticky
+        public UnityAction OnClick;             // invoked when toast body clicked
+        public NotificationStyle Style;
+        public Color? AccentOverride;           // optional color override
+        public object Tag;                      // optional correlation token
+
+        public NotificationRequest(string message)
+        {
+            Title = null;
+            Message = message;
+            Icon = null;
+            Duration = 4f;
+            OnClick = null;
+            Style = NotificationStyle.Neutral;
+            AccentOverride = null;
+            Tag = null;
+        }
+    }
+
+    /// <summary>
+    /// Drop this on a GameObject in your scene with a Canvas (Screen Space - Overlay or Camera).
+    /// Provide a container RectTransform and a NotificationItem prefab.
+    /// </summary>
+    public class NotificationManager : MonoBehaviour
+    {
+        public static NotificationManager Instance { get; private set; }
+
+        [Header("Setup")]
+        [SerializeField] private Canvas canvas;                         // optional; auto-find if null
+        [SerializeField] private RectTransform container;               // parent for items (uses VerticalLayoutGroup)
+        [SerializeField] private NotificationItem itemPrefab;
+
+        [Header("Behavior")]
+        [SerializeField] private NotificationCorner corner = NotificationCorner.TopRight;
+        [SerializeField] private int maxVisible = 4;
+        [SerializeField] private float spacing = 8f;
+        [SerializeField] private bool dontDestroyOnLoad = true;
+        [SerializeField] private float slidePixels = 32f;               // how far in from edge on enter
+        [SerializeField] private float tweenIn = 0.18f;
+        [SerializeField] private float tweenOut = 0.15f;
+
+        private readonly Queue<NotificationRequest> _queue = new();
+        private readonly List<NotificationItem> _active = new();
+        private VerticalLayoutGroup _layout;
+
+        void Awake()
+        {
+            if (Instance != null && Instance != this)
+            {
+                Destroy(gameObject);
+                return;
+            }
+            Instance = this;
+            if (dontDestroyOnLoad) DontDestroyOnLoad(gameObject);
+
+            if (!canvas) canvas = GetComponentInParent<Canvas>();
+            if (!container) container = GetComponentInChildren<RectTransform>(true);
+            _layout = container.GetComponent<VerticalLayoutGroup>();
+            if (_layout == null) _layout = container.gameObject.AddComponent<VerticalLayoutGroup>();
+            _layout.spacing = spacing;
+            _layout.childControlHeight = true;
+            _layout.childControlWidth = true;
+            _layout.childForceExpandHeight = false;
+            _layout.childForceExpandWidth = false;
+
+            ApplyCorner();
+        }
+
+        void OnValidate()
+        {
+            if (container)
+            {
+                var vg = container.GetComponent<VerticalLayoutGroup>();
+                if (vg) vg.spacing = spacing;
+            }
+            ApplyCorner();
+        }
+
+        private void ApplyCorner()
+        {
+            if (!container) return;
+
+            // Anchor/pivot to chosen corner
+            Vector2 anchorMin, anchorMax, pivot;
+            TextAnchor alignment;
+            bool reverse = false;
+
+            switch (corner)
+            {
+                case NotificationCorner.TopRight:
+                    anchorMin = anchorMax = pivot = new Vector2(1, 1);
+                    alignment = TextAnchor.UpperRight;
+                    reverse = false; // stack downward visually from top (but we use layout; newest at top)
+                    break;
+                case NotificationCorner.TopLeft:
+                    anchorMin = anchorMax = pivot = new Vector2(0, 1);
+                    alignment = TextAnchor.UpperLeft;
+                    reverse = false;
+                    break;
+                case NotificationCorner.BottomRight:
+                    anchorMin = anchorMax = pivot = new Vector2(1, 0);
+                    alignment = TextAnchor.LowerRight;
+                    reverse = true;  // visually grow upward
+                    break;
+                case NotificationCorner.BottomLeft:
+                    anchorMin = anchorMax = pivot = new Vector2(0, 0);
+                    alignment = TextAnchor.LowerLeft;
+                    reverse = true;
+                    break;
+                default:
+                    anchorMin = anchorMax = pivot = new Vector2(1, 1);
+                    alignment = TextAnchor.UpperRight;
+                    break;
+            }
+
+            container.anchorMin = anchorMin;
+            container.anchorMax = anchorMax;
+            container.pivot = pivot;
+            container.anchoredPosition = Vector2.zero;
+
+            if (_layout)
+            {
+                _layout.childAlignment = alignment;
+                // Unity’s VerticalLayoutGroup has no “reverse”, so we just insert at index 0 for top stacks.
+            }
+        }
+
+        // ---------- Public Static API ----------
+
+        public static void SetCorner(NotificationCorner c) { Ensure().corner = c; Ensure().ApplyCorner(); }
+        public static void SetMaxVisible(int n) { Ensure().maxVisible = Mathf.Max(1, n); Ensure().Pump(); }
+
+        public static NotificationItem Show(
+            string message,
+            Sprite icon = null,
+            float? duration = 4f,
+            UnityAction onClick = null,
+            string title = null,
+            NotificationStyle style = NotificationStyle.Neutral,
+            Color? accentOverride = null,
+            object tag = null)
+        {
+            var req = new NotificationRequest(message)
+            {
+                Title = title,
+                Icon = icon,
+                Duration = duration,
+                OnClick = onClick,
+                Style = style,
+                AccentOverride = accentOverride,
+                Tag = tag
+            };
+            return Show(req);
+        }
+
+        public static NotificationItem Show(NotificationRequest req)
+        {
+            var mgr = Ensure();
+            mgr._queue.Enqueue(req);
+            mgr.Pump();
+            return null; // actual item is created asynchronously in Pump
+        }
+
+        public static void DismissAll(bool withAnimation = true)
+        {
+            var mgr = Ensure();
+            // clone to avoid modifying while iterating
+            var copy = new List<NotificationItem>(mgr._active);
+            foreach (var i in copy) i.Close(withAnimation);
+            mgr._queue.Clear();
+        }
+
+        // ---------- Internals ----------
+
+        private static NotificationManager Ensure()
+        {
+            if (Instance != null) return Instance;
+
+            // Create a default system if none exists (convenience).
+            var go = new GameObject("NotificationSystem");
+            var canvasGO = new GameObject("Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+            canvasGO.transform.SetParent(go.transform, false);
+            var c = canvasGO.GetComponent<Canvas>();
+            c.renderMode = RenderMode.ScreenSpaceOverlay;
+            var scaler = canvasGO.GetComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1920, 1080);
+
+            var containerGO = new GameObject("Container", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(ContentSizeFitter));
+            containerGO.transform.SetParent(canvasGO.transform, false);
+            var rt = containerGO.GetComponent<RectTransform>();
+            rt.sizeDelta = new Vector2(420f, 10f);
+
+            var fit = containerGO.GetComponent<ContentSizeFitter>();
+            fit.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            fit.horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            var mgr = go.AddComponent<NotificationManager>();
+            mgr.canvas = c;
+            mgr.container = rt;
+
+            Debug.LogWarning("[NotificationManager] No instance in scene. Created a default overlay canvas. For full control, add a NotificationManager prefab to your scene.");
+            return mgr;
+        }
+
+        private void Pump()
+        {
+            while (_active.Count < maxVisible && _queue.Count > 0)
+            {
+                var req = _queue.Dequeue();
+                CreateItem(req);
+            }
+        }
+
+        private void OnItemClosed(NotificationItem item)
+        {
+            _active.Remove(item);
+            Pump();
+        }
+
+        private void CreateItem(NotificationRequest req)
+        {
+            var item = Instantiate(itemPrefab, container);
+            // Insert at top for "newest on top" in top corners
+            bool newestAtTop = corner == NotificationCorner.TopRight || corner == NotificationCorner.TopLeft;
+            if (newestAtTop) item.transform.SetSiblingIndex(0);
+
+            _active.Add(item);
+
+            item.Initialize(
+                req,
+                slidePixels: slidePixels,
+                tweenIn: tweenIn,
+                tweenOut: tweenOut,
+                // onClosed:
+                () => OnItemClosed(item)
+            );
+        }
+    }
+}
+
+
+using System;
+using UnityEngine;
+using UnityEngine.Events;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+using TMPro;
+using DG.Tweening;
+
+namespace Toasts
+{
+    /// <summary>
+    /// Attach to the NotificationItem prefab. Handles visuals, hover, timers, and tweens.
+    /// </summary>
+    public class NotificationItem : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
+    {
+        [Header("Wiring")]
+        [SerializeField] private CanvasGroup rootGroup;
+        [SerializeField] private Image backdrop;            // rounded background
+        [SerializeField] private Image accentStrip;         // 4px accent strip (optional)
+        [SerializeField] private Image iconImage;           // optional icon
+        [SerializeField] private TMP_Text titleText;
+        [SerializeField] private TMP_Text bodyText;
+        [SerializeField] private Button closeButton;        // small × button
+        [SerializeField] private CanvasGroup closeCg;       // fade in × on hover
+        [SerializeField] private Button bodyButton;         // invisible button covering the body for clicks
+        [SerializeField] private LayoutElement layout;      // for min size
+
+        [Header("Style")]
+        [SerializeField] private Color bgNeutral = new(0.12f, 0.12f, 0.12f, 0.96f);
+        [SerializeField] private Color bgHover = new(0.16f, 0.16f, 0.16f, 0.96f);
+        [SerializeField] private Color accentInfo = new(0.28f, 0.58f, 1f, 1f);
+        [SerializeField] private Color accentSuccess = new(0.25f, 0.75f, 0.45f, 1f);
+        [SerializeField] private Color accentWarning = new(1f, 0.74f, 0.27f, 1f);
+        [SerializeField] private Color accentError = new(0.98f, 0.33f, 0.33f, 1f);
+        [SerializeField] private Color accentNeutral = new(0.65f, 0.65f, 0.65f, 1f);
+
+        private NotificationRequest _req;
+        private float _tweenIn = 0.18f, _tweenOut = 0.15f;
+        private float _slide = 24f;
+        private bool _hovering;
+        private bool _closing;
+        private float? _durationRemaining; // countdown (pauses on hover)
+        private Tween _fadeTween, _moveTween;
+
+        private Action _onClosed;
+
+        public void Initialize(NotificationRequest req, float slidePixels, float tweenIn, float tweenOut, Action onClosed)
+        {
+            _req = req;
+            _slide = slidePixels;
+            _tweenIn = tweenIn;
+            _tweenOut = tweenOut;
+            _onClosed = onClosed;
+
+            if (!rootGroup) rootGroup = gameObject.AddComponent<CanvasGroup>();
+            rootGroup.alpha = 0f;
+
+            // Content
+            titleText.gameObject.SetActive(!string.IsNullOrEmpty(req.Title));
+            if (titleText) titleText.text = req.Title ?? "";
+            if (bodyText) bodyText.text = req.Message ?? "";
+
+            if (iconImage)
+            {
+                bool showIcon = req.Icon != null;
+                iconImage.gameObject.SetActive(showIcon);
+                if (showIcon) iconImage.sprite = req.Icon;
+            }
+
+            // Accent color by style
+            Color accent = req.AccentOverride ?? StyleToColor(req.Style);
+            if (accentStrip) accentStrip.color = accent;
+
+            // Close button
+            if (closeCg) closeCg.alpha = 0f;
+            if (closeButton) closeButton.onClick.AddListener(() => Close(true));
+
+            // Click handler
+            if (bodyButton)
+            {
+                bodyButton.onClick.RemoveAllListeners();
+                if (req.OnClick != null)
+                    bodyButton.onClick.AddListener(req.OnClick);
+                // If you click, macOS usually also dismisses; you can keep or remove this:
+                bodyButton.onClick.AddListener(() => Close(true));
+            }
+
+            // Timer
+            _durationRemaining = req.Duration;
+
+            // Enter animation (fade + slight slide from edge)
+            var rt = (RectTransform)transform;
+            Vector2 start = rt.anchoredPosition;
+            // slide from +X (assumes right corners) or -X (left corners) — infer from parent pivot
+            bool rightSide = rt.parent is RectTransform pr && pr.pivot.x > 0.5f;
+            float dir = rightSide ? 1f : -1f;
+
+            rt.anchoredPosition = start + new Vector2(_slide * dir, 0f);
+            _moveTween = rt.DOAnchorPos(start, _tweenIn).SetEase(Ease.OutCubic);
+            _fadeTween = rootGroup.DOFade(1f, _tweenIn).SetEase(Ease.OutQuad);
+
+            if (_durationRemaining.HasValue)
+                InvokeRepeating(nameof(Tick), 0.2f, 0.2f);
+        }
+
+        private Color StyleToColor(NotificationStyle s) => s switch
+        {
+            NotificationStyle.Info => accentInfo,
+            NotificationStyle.Success => accentSuccess,
+            NotificationStyle.Warning => accentWarning,
+            NotificationStyle.Error => accentError,
+            NotificationStyle.Neutral => accentNeutral,
+            _ => accentNeutral
+        };
+
+        void OnDestroy()
+        {
+            _fadeTween?.Kill();
+            _moveTween?.Kill();
+            CancelInvoke();
+        }
+
+        public void Close(bool withAnimation)
+        {
+            if (_closing) return;
+            _closing = true;
+            CancelInvoke();
+
+            if (withAnimation && rootGroup)
+            {
+                var rt = (RectTransform)transform;
+                bool rightSide = rt.parent is RectTransform pr && pr.pivot.x > 0.5f;
+                float dir = rightSide ? 1f : -1f;
+
+                Sequence seq = DOTween.Sequence();
+                seq.Join(rootGroup.DOFade(0f, _tweenOut).SetEase(Ease.InQuad));
+                seq.Join(rt.DOAnchorPos(rt.anchoredPosition + new Vector2(_slide * dir, 0f), _tweenOut).SetEase(Ease.InCubic));
+                seq.OnComplete(DestroySelf);
+            }
+            else
+            {
+                DestroySelf();
+            }
+        }
+
+        private void DestroySelf()
+        {
+            try { _onClosed?.Invoke(); } catch { /* user callback safety */ }
+            Destroy(gameObject);
+        }
+
+        private void Tick()
+        {
+            if (_hovering || !_durationRemaining.HasValue) return;
+            _durationRemaining -= 0.2f;
+            if (_durationRemaining <= 0f)
+                Close(true);
+        }
+
+        // ---------- Hover UX ----------
+
+        public void OnPointerEnter(PointerEventData eventData)
+        {
+            _hovering = true;
+            if (closeCg) closeCg.DOFade(1f, 0.12f).SetEase(Ease.OutQuad);
+            if (backdrop) backdrop.DOColor(bgHover, 0.12f);
+        }
+
+        public void OnPointerExit(PointerEventData eventData)
+        {
+            _hovering = false;
+            if (closeCg) closeCg.DOFade(0f, 0.16f).SetEase(Ease.InQuad);
+            if (backdrop) backdrop.DOColor(bgNeutral, 0.16f);
+        }
+    }
+}
+
+
+
+
+
+
+
