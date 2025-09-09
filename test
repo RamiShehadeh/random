@@ -438,6 +438,271 @@ namespace Toasts
 
 
 
+moarrr
+
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+using TMPro;
+
+public class UISymbolClusterController : MonoBehaviour
+{
+    [Header("Refs")]
+    [SerializeField] private UISymbolManager symbolManager;
+    [SerializeField] private Camera uiCamera;                 // same camera UISymbolManager uses
+    [SerializeField] private RectTransform overlayCanvasRoot; // parent for cluster icons (usually symbolContainer)
+    
+    [Header("Cluster UI")]
+    [SerializeField] private GameObject clusterIconPrefab;    // bubble with optional texts (total + per-type row)
+
+    [Header("Tuning")]
+    [SerializeField] private int cellPx = 64;
+    [SerializeField] private float maxHz = 10f;
+    [SerializeField] private float camMovePxThreshold = 24f;
+    [SerializeField] private float zoomRelThreshold = 0.03f;  // 3%
+
+    // Internal
+    private float _lastRun;
+    private Vector3 _lastCamPos;
+    private float _lastCamHeight;
+    private readonly Dictionary<int, ClusterView> _liveClusters = new();
+    private readonly Queue<ClusterView> _pool = new();
+    private ScreenGrid _grid;
+
+    // Scratch
+    private readonly Dictionary<int, Cell> _cells = new(); // key -> cell data
+    private readonly List<UISymbolDisplay> _scratchMembers = new();
+
+    void Reset()
+    {
+        if (!symbolManager) symbolManager = GetComponent<UISymbolManager>();
+    }
+
+    void LateUpdate()
+    {
+        if (!symbolManager || !uiCamera || !overlayCanvasRoot) return;
+
+        if (!ShouldRecompute()) return;
+
+        // Build/update the math grid when resolution or cellPx changed
+        if (_grid.CellPx != cellPx || _grid.Width != Screen.width || _grid.Height != Screen.height)
+            _grid = ScreenGrid.Build(cellPx);
+
+        // STEP 1: clear old cell bins
+        _cells.Clear();
+
+        // STEP 2: project and bin
+        foreach (var kv in symbolManager.SymbolMap)
+        {
+            var display = kv.Key;
+            if (!display || !display.isActiveAndEnabled) continue;
+
+            Vector3 sp = RectTransformUtility.WorldToScreenPoint(uiCamera, display.transform.position);
+            if (sp.z <= 0 || sp.x < 0 || sp.y < 0 || sp.x > _grid.Width || sp.y > _grid.Height) 
+            {
+                display.ClusterHidden = false; // out of view => let UISymbolManager handle hide by its own cull
+                continue;
+            }
+
+            var cell = _grid.ToCell(new Vector2(sp.x, sp.y));
+            int key = cell.y * _grid.Cols + cell.x; // dense, collision-free int key
+
+            if (!_cells.TryGetValue(key, out var c))
+            {
+                c = new Cell { Key = key, CellCoord = cell };
+                _cells[key] = c;
+            }
+
+            c.Add(display, kv.Value, new Vector2(sp.x, sp.y));
+        }
+
+        // STEP 3: decide who’s hidden and which clusters to show
+        // First mark everything as NOT hidden; occupied cells will flip members to hidden if clustered
+        foreach (var kv in symbolManager.SymbolMap)
+            if (kv.Key) kv.Key.ClusterHidden = false;
+
+        // Track cells used this pass so we can recycle unused cluster views
+        var usedClusterKeys = HashSetPool<int>.Get();
+
+        foreach (var kv in _cells)
+        {
+            var c = kv.Value;
+
+            if (c.Count <= 1)
+            {
+                // single item -> no cluster bubble, member stays visible
+                HideClusterForCell(c.Key); 
+                continue;
+            }
+
+            // >1: cluster cell
+            usedClusterKeys.Add(c.Key);
+
+            // hide all member icons in this cell (cluster replaces them)
+            foreach (var m in c.Members)
+                if (m) m.ClusterHidden = true;
+
+            // get or spawn one cluster view
+            var view = GetClusterForCell(c.Key);
+            var center = _grid.CellCenterPx(c.CellCoord);
+            view.Rect.anchoredPosition = center;
+
+            // Fill data: total + type breakdown
+            view.SetTotal(c.Count);
+            view.SetBreakdown(c.TypeCounts);
+
+            view.Show(true);
+        }
+
+        // STEP 4: recycle cluster views of cells not used this frame
+        var toRecycle = ListPool<int>.Get();
+        foreach (var pair in _liveClusters)
+            if (!usedClusterKeys.Contains(pair.Key))
+                toRecycle.Add(pair.Key);
+        foreach (var k in toRecycle) HideClusterForCell(k);
+        ListPool<int>.Release(toRecycle);
+        HashSetPool<int>.Release(usedClusterKeys);
+
+        // book-keeping
+        _lastRun = Time.unscaledTime;
+        _lastCamPos = uiCamera.transform.position;
+        _lastCamHeight = uiCamera.transform.position.magnitude; // rough zoom proxy
+    }
+
+    bool ShouldRecompute()
+    {
+        if (Time.unscaledTime - _lastRun < 1f / maxHz) return false;
+
+        var cam = uiCamera.transform;
+        float camHeight = cam.position.magnitude;
+        if (Mathf.Abs(camHeight - _lastCamHeight) / Mathf.Max(1f, _lastCamHeight) > zoomRelThreshold)
+            return true;
+
+        if ((cam.position - _lastCamPos).sqrMagnitude > camMovePxThreshold * camMovePxThreshold)
+            return true;
+
+        // optionally: return true on a timer if symbols move fast (5–10 Hz is fine)
+        return true; // safe default
+    }
+
+    // ---------- cluster view pooling ----------
+    private ClusterView GetClusterForCell(int key)
+    {
+        if (_liveClusters.TryGetValue(key, out var v)) return v;
+
+        var go = _pool.Count > 0 ? _pool.Dequeue().gameObject : Instantiate(clusterIconPrefab, overlayCanvasRoot);
+        var cv = go.GetComponent<ClusterView>();
+        if (!cv) cv = go.AddComponent<ClusterView>();
+        cv.Init();
+        _liveClusters[key] = cv;
+        return cv;
+    }
+
+    private void HideClusterForCell(int key)
+    {
+        if (_liveClusters.TryGetValue(key, out var v))
+        {
+            v.Show(false);
+            _pool.Enqueue(v);
+            _liveClusters.Remove(key);
+        }
+    }
+
+    // ---------- data structs ----------
+    private class Cell
+    {
+        public int Key;
+        public Vector2Int CellCoord;
+        public readonly List<UISymbolDisplay> Members = new();
+        public readonly Dictionary<string, int> TypeCounts = new();
+        public int Count => Members.Count;
+
+        public void Add(UISymbolDisplay d, UISymbol symbol, Vector2 screenPos)
+        {
+            Members.Add(d);
+            // get type label from your UISymbol / ScenarioProp / etc.
+            string type = symbol != null ? symbol.TypeName : "Unknown"; // add a public TypeName on UISymbol if you don’t have one yet
+            if (!TypeCounts.TryGetValue(type, out var c)) c = 0;
+            TypeCounts[type] = c + 1;
+        }
+    }
+
+    // math grid
+    private struct ScreenGrid
+    {
+        public int CellPx, Cols, Rows, Width, Height;
+
+        public static ScreenGrid Build(int cellPx)
+        {
+            var g = new ScreenGrid
+            {
+                CellPx = cellPx,
+                Width = Screen.width,
+                Height = Screen.height
+            };
+            g.Cols = Mathf.CeilToInt((float)g.Width / cellPx);
+            g.Rows = Mathf.CeilToInt((float)g.Height / cellPx);
+            return g;
+        }
+
+        public Vector2Int ToCell(Vector2 screenPos)
+        {
+            return new Vector2Int(
+                Mathf.Clamp((int)(screenPos.x / CellPx), 0, Cols - 1),
+                Mathf.Clamp((int)(screenPos.y / CellPx), 0, Rows - 1)
+            );
+        }
+
+        public Vector2 CellCenterPx(Vector2Int cell)
+        {
+            return new Vector2(cell.x * CellPx + CellPx * 0.5f,
+                               cell.y * CellPx + CellPx * 0.5f);
+        }
+    }
+
+    // ---------- light pools ----------
+    static class ListPool<T>
+    {
+        static readonly Stack<List<T>> pool = new();
+        public static List<T> Get() => pool.Count > 0 ? pool.Pop() : new List<T>(64);
+        public static void Release(List<T> l) { l.Clear(); pool.Push(l); }
+    }
+
+    static class HashSetPool<T>
+    {
+        static readonly Stack<HashSet<T>> pool = new();
+        public static HashSet<T> Get() => pool.Count > 0 ? pool.Pop() : new HashSet<T>();
+        public static void Release(HashSet<T> s) { s.Clear(); pool.Push(s); }
+    }
+}
+
+// Simple view wrapper so we don’t depend on a specific prefab structure
+public class ClusterView : MonoBehaviour
+{
+    public RectTransform Rect { get; private set; }
+    [SerializeField] private TMP_Text totalText;      // optional
+    [SerializeField] private Transform breakdownRoot; // optional parent for per-type rows
+
+    public void Init()
+    {
+        if (!Rect) Rect = transform as RectTransform;
+        // Try auto-wire children by name if not set in Inspector
+        if (!totalText) totalText = transform.GetComponentInChildren<TMP_Text>();
+    }
+
+    public void SetTotal(int total)
+    {
+        if (totalText) totalText.text = total > 99 ? "99+" : total.ToString();
+    }
+
+    public void SetBreakdown(Dictionary<string, int> typeCounts)
+    {
+        // Optional: populate colored chips under the total
+        // (left for your specific prefab; safe to no-op)
+    }
+
+    public void Show(bool v) => gameObject.SetActive(v);
+}
 
 
 
