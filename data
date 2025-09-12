@@ -1,3 +1,34 @@
+
+    foreach (var kv in cells)
+    {
+        var c = kv.Value;                           // your Cell { Key, CellCoord, Members, ... }
+        int cx = c.CellCoord.x * cellPx;
+        int cyBottom = c.CellCoord.y * cellPx;
+
+        // IMGUI's (0,0) is top-left, but your screen coords are bottom-left → flip Y
+        int yTop = h - cyBottom - cellPx;
+        var rect = new Rect(cx, yTop, cellPx, cellPx);
+
+        // fill
+        GUI.color = debugCellFill;
+        GUI.DrawTexture(rect, _debugWhiteTex);
+
+        // border
+        GUI.color = debugCellBorder;
+        GUI.DrawTexture(new Rect(rect.xMin, rect.yMin, rect.width, 2), _debugWhiteTex);
+        GUI.DrawTexture(new Rect(rect.xMin, rect.yMax - 2, rect.width, 2), _debugWhiteTex);
+        GUI.DrawTexture(new Rect(rect.xMin, rect.yMin, 2, rect.height), _debugWhiteTex);
+        GUI.DrawTexture(new Rect(rect.xMax - 2, rect.yMin, 2, rect.height), _debugWhiteTex);
+
+        // count
+        GUI.color = Color.white;
+        GUI.Label(rect, c.Count.ToString(), _debugLabel);
+    }
+
+    GUI.color = Color.white; // reset
+
+
+
 using System;
 using System.Collections.Generic;
 using UnityEngine;
