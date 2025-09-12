@@ -1,0 +1,477 @@
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.Pool;
+
+/// <summary>
+/// World-space clustering (camera-angle independent).
+/// - Groups nearby symbols using a 3D radius (ECEF/world).
+/// - Hysteresis: join vs leave radius to avoid flicker.
+/// - Stable cluster identity: min member id.
+/// - Smoothed center to avoid jitter.
+/// - One cluster bubble per cluster; members hide via UISymbolDisplay.HiddenUnderCluster.
+/// Assumes UISymbolManager exposes SymbolMap, SymbolContainer (RectTransform), and UICamera.
+/// </summary>
+[DisallowMultipleComponent]
+public class WorldClusterManager : MonoBehaviour
+{
+    [Header("References")]
+    [SerializeField] private UISymbolManager symbolManager;
+    [SerializeField] private RectTransform clusterContainer;    // usually your symbolContainer / overlay canvas root
+    [SerializeField] private Camera uiCamera;
+    [SerializeField] private GameObject clusterIconPrefab;      // prefab with ClusterView on root
+
+    [Header("Clustering (meters)")]
+    [Tooltip("Distance at which points join the same cluster.")]
+    [SerializeField] private double joinRadiusMeters = 15000;   // R_join
+    [Tooltip("Distance to leave a cluster; must be >= joinRadiusMeters (hysteresis).")]
+    [SerializeField] private double leaveRadiusMeters = 18000;  // R_leave (stickiness)
+
+    [Header("LOD")]
+    [Tooltip("Below this height, do NOT cluster; let individual icons render as usual.")]
+    [SerializeField] private float labelEnableHeight = 10000f;  // match your existing threshold
+
+    [Header("Stability")]
+    [Tooltip("Exponential smoothing time (seconds, unscaled) for cluster centers.")]
+    [SerializeField] private float centerSmoothSeconds = 0.08f;
+    [Tooltip("How often to recompute (Hz). 0 = every frame.")]
+    [SerializeField] private float maxHz = 12f;
+
+    // --- Internal state ---
+    private readonly Dictionary<int, ClusterView> liveViews = new();
+    private ObjectPool<ClusterView> viewPool;
+
+    private readonly Dictionary<(int,int,int), List<int>> bins = new();  // spatial hash bins
+    private readonly List<WPoint> points = new(1024);                    // current frame points
+    private int[] parent = Array.Empty<int>();                            // Union-Find parents
+    private readonly Dictionary<int, V3d> prevCenters = new();            // stableId -> smoothed center
+
+    // scratch
+    private readonly List<WCluster> clustersScratch = new(256);
+    private readonly HashSet<int> usedIdsScratch = new();
+    private readonly List<int> toRecycleScratch = new();
+
+    private float lastRun;
+
+    // ---------- Unity ----------
+    private void Awake()
+    {
+        GrabReferences();
+
+        viewPool = new ObjectPool<ClusterView>(
+            createFunc: PoolCreate,
+            actionOnGet: PoolGet,
+            actionOnRelease: PoolRelease,
+            actionOnDestroy: PoolDestroy,
+            collectionCheck: false,
+            defaultCapacity: 64,
+            maxSize: 256
+        );
+    }
+
+    private void LateUpdate()
+    {
+        if (!symbolManager || !uiCamera || !clusterContainer) return;
+
+        if (!ShouldRecompute()) return;
+
+        float camHeight = GetCameraHeight(); // use your Cesium height if you have it
+
+        // Below height threshold → no clustering; make sure all members are visible and recycle all clusters.
+        if (camHeight < labelEnableHeight)
+        {
+            ShowIndividualsOnly();
+            RecycleAllClusters();
+            Stamp();
+            return;
+        }
+
+        // 1) Collect visible points in ECEF (or world if you prefer)
+        CollectPoints();
+
+        // 2) Build world clusters using spatial hash + union-find with join radius
+        BuildClusters(clustersScratch);
+
+        // 3) Apply hysteresis (leave radius) + temporal smoothing of centers is done in BuildClusters()
+
+        // 4) Tell UI what to show/hide & place cluster bubbles
+        ApplyToUI(clustersScratch);
+
+        // 5) Recycle cluster views that weren’t used this pass
+        RecycleUnusedClusters();
+
+        Stamp();
+    }
+
+    // ---------- Steps ----------
+    private bool ShouldRecompute()
+    {
+        if (maxHz <= 0f) return true;
+        return (Time.unscaledTime - lastRun) >= (1f / maxHz);
+    }
+
+    private void Stamp()
+    {
+        lastRun = Time.unscaledTime;
+    }
+
+    private void GrabReferences()
+    {
+        if (!uiCamera) uiCamera = Camera.main;
+        if (!symbolManager) symbolManager = GetComponent<UISymbolManager>();
+        if (!clusterContainer && symbolManager) clusterContainer = symbolManager.SymbolContainer;
+    }
+
+    private void ShowIndividualsOnly()
+    {
+        foreach (var kv in symbolManager.SymbolMap)
+            if (kv.Key) kv.Key.HiddenUnderCluster = false;
+    }
+
+    private void RecycleAllClusters()
+    {
+        toRecycleScratch.Clear();
+        foreach (var kv in liveViews) toRecycleScratch.Add(kv.Key);
+        foreach (var id in toRecycleScratch) HideCluster(id);
+        toRecycleScratch.Clear();
+    }
+
+    private void CollectPoints()
+    {
+        points.Clear();
+
+        foreach (var kv in symbolManager.SymbolMap)
+        {
+            var display = kv.Key;
+            if (!display || !display.isActiveAndEnabled) continue;
+
+            // Use your own visibility rules; keep exactly what works for you:
+            // (Assumes you have extension methods on Camera: IsPointVisible / IsBehindGlobe)
+            Vector3 worldPos = display.transform.position;
+            if (!uiCamera.IsPointVisible(worldPos) || uiCamera.IsBehindGlobe(worldPos))
+            {
+                display.HiddenUnderCluster = false;
+                continue;
+            }
+
+            var ecef = GetECEF(display.transform); // implement below
+            points.Add(new WPoint
+            {
+                Id = display.GetInstanceID(),
+                Ecef = ecef,
+                Type = kv.Value != null ? kv.Value.TypeName : "Unknown", // add TypeName on UISymbol
+                Display = display
+            });
+        }
+    }
+
+    private void BuildClusters(List<WCluster> outClusters)
+    {
+        outClusters.Clear();
+        bins.Clear();
+
+        int n = points.Count;
+        EnsureParent(n);
+
+        for (int i = 0; i < n; i++) parent[i] = i;
+
+        double cell = Math.Max(1.0, joinRadiusMeters);
+
+        // bin all points
+        for (int i = 0; i < n; i++)
+        {
+            var p = points[i].Ecef;
+            var key = ((int)Math.Floor(p.x / cell),
+                       (int)Math.Floor(p.y / cell),
+                       (int)Math.Floor(p.z / cell));
+            if (!bins.TryGetValue(key, out var list))
+            {
+                list = new List<int>(8);
+                bins[key] = list;
+            }
+            list.Add(i);
+        }
+
+        // neighbor offsets (3x3x3)
+        (int,int,int)[] N = new (int,int,int)[27];
+        int idx = 0;
+        for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++)
+            N[idx++] = (dx,dy,dz);
+
+        double r2 = joinRadiusMeters * joinRadiusMeters;
+
+        // union within join radius using bins
+        for (int i = 0; i < n; i++)
+        {
+            var p = points[i].Ecef;
+            var baseKey = ((int)Math.Floor(p.x / cell),
+                           (int)Math.Floor(p.y / cell),
+                           (int)Math.Floor(p.z / cell));
+
+            for (int t = 0; t < N.Length; t++)
+            {
+                var nk = (baseKey.Item1 + N[t].Item1, baseKey.Item2 + N[t].Item2, baseKey.Item3 + N[t].Item3);
+                if (!bins.TryGetValue(nk, out var list)) continue;
+
+                for (int j = 0; j < list.Count; j++)
+                {
+                    int k = list[j];
+                    if (k <= i) continue;
+                    if ((points[i].Ecef - points[k].Ecef).SqrMagnitude() <= r2)
+                        Union(i, k);
+                }
+            }
+        }
+
+        // gather by root
+        var groups = new Dictionary<int, List<int>>();
+        for (int i = 0; i < n; i++)
+        {
+            int r = Find(i);
+            if (!groups.TryGetValue(r, out var g)) { g = new List<int>(8); groups[r] = g; }
+            g.Add(i);
+        }
+
+        // build clusters with leave radius and smoothing
+        double leaveR2 = leaveRadiusMeters * leaveRadiusMeters;
+        float dt = Mathf.Max(0.0001f, Time.unscaledDeltaTime);
+        double alpha = 1.0 - Math.Exp(-(double)dt / Math.Max(0.0001, (double)centerSmoothSeconds));
+
+        foreach (var g in groups.Values)
+        {
+            if (g.Count == 1)
+            {
+                // keep as singleton (UI will render individual)
+                int i = g[0];
+                var wp = points[i];
+                var single = new WCluster
+                {
+                    StableId = wp.Id,
+                    CenterEcef = wp.Ecef,
+                    Members = new List<WPoint> { wp },
+                    TypeCounts = new Dictionary<string, int> { { wp.Type, 1 } }
+                };
+                outClusters.Add(single);
+                continue;
+            }
+
+            // raw centroid
+            V3d c = V3d.zero;
+            for (int t = 0; t < g.Count; t++) c += points[g[t]].Ecef;
+            c /= (double)g.Count;
+
+            // keep members within leave radius of centroid (hysteresis)
+            var kept = new List<WPoint>(g.Count);
+            var tc = new Dictionary<string, int>();
+            for (int t = 0; t < g.Count; t++)
+            {
+                var wp = points[g[t]];
+                if ((wp.Ecef - c).SqrMagnitude() <= leaveR2)
+                {
+                    kept.Add(wp);
+                    if (!tc.TryGetValue(wp.Type, out var cnt)) cnt = 0;
+                    tc[wp.Type] = cnt + 1;
+                }
+            }
+            if (kept.Count == 0) continue;
+
+            // stable id: smallest member id
+            int sid = int.MaxValue;
+            for (int t = 0; t < kept.Count; t++) sid = Mathf.Min(sid, kept[t].Id);
+
+            // temporal smoothing of center (EMA)
+            V3d center = c;
+            if (prevCenters.TryGetValue(sid, out var prev))
+                center = prev + (c - prev) * alpha;
+            prevCenters[sid] = center;
+
+            outClusters.Add(new WCluster
+            {
+                StableId = sid,
+                CenterEcef = center,
+                Members = kept,
+                TypeCounts = tc
+            });
+        }
+    }
+
+    private void ApplyToUI(List<WCluster> clusters)
+    {
+        // 1) default: show everything
+        foreach (var kv in symbolManager.SymbolMap)
+            if (kv.Key) kv.Key.HiddenUnderCluster = false;
+
+        usedIdsScratch.Clear();
+
+        // 2) for each cluster:
+        foreach (var cl in clusters)
+        {
+            if (cl.Members.Count <= 1)
+            {
+                // singleton -> show as individual, no cluster view
+                continue;
+            }
+
+            // mark members hidden
+            for (int i = 0; i < cl.Members.Count; i++)
+                if (cl.Members[i].Display) cl.Members[i].Display.HiddenUnderCluster = true;
+
+            usedIdsScratch.Add(cl.StableId);
+
+            // get or create a cluster view
+            ClusterView view = GetView(cl.StableId);
+
+            // project cluster center to canvas
+            Vector3 world = EcefToWorld(cl.CenterEcef); // if you have Cesium, use georef.TransformEcefToUnity
+            Vector3 sp = RectTransformUtility.WorldToScreenPoint(uiCamera, world);
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(clusterContainer, sp, uiCamera, out var anchored);
+            view.Rect.anchoredPosition = anchored;
+
+            // visuals
+            view.SetTotal(cl.Members.Count);
+            view.SetSubgroupCounts(cl.TypeCounts);
+            view.Show(true);
+        }
+    }
+
+    private void RecycleUnusedClusters()
+    {
+        toRecycleScratch.Clear();
+        foreach (var kv in liveViews)
+            if (!usedIdsScratch.Contains(kv.Key))
+                toRecycleScratch.Add(kv.Key);
+
+        for (int i = 0; i < toRecycleScratch.Count; i++)
+            HideCluster(toRecycleScratch[i]);
+
+        usedIdsScratch.Clear();
+        toRecycleScratch.Clear();
+    }
+
+    // ---------- Pool ----------
+    private ClusterView PoolCreate()
+    {
+        var go = Instantiate(clusterIconPrefab, clusterContainer);
+        var cv = go.GetComponent<ClusterView>();
+        if (!cv) cv = go.AddComponent<ClusterView>();
+        cv.Init();
+        return cv;
+    }
+
+    private void PoolGet(ClusterView cv)
+    {
+        var cg = cv.GetComponent<CanvasGroup>() ?? cv.gameObject.AddComponent<CanvasGroup>();
+        cg.alpha = 1f;
+        cv.gameObject.SetActive(true);
+        cv.Rect.SetParent(clusterContainer, false);
+        cv.Rect.SetAsLastSibling();
+    }
+
+    private void PoolRelease(ClusterView cv)
+    {
+        var cg = cv.GetComponent<CanvasGroup>();
+        if (cg) cg.alpha = 0f;
+        cv.gameObject.SetActive(false);
+    }
+
+    private void PoolDestroy(ClusterView cv)
+    {
+        if (cv) Destroy(cv.gameObject);
+    }
+
+    private ClusterView GetView(int id)
+    {
+        if (liveViews.TryGetValue(id, out var v)) return v;
+        var cv = viewPool.Get();
+        liveViews[id] = cv;
+        return cv;
+    }
+
+    private void HideCluster(int id)
+    {
+        if (liveViews.TryGetValue(id, out var v))
+        {
+            v.Show(false);
+            viewPool.Release(v);
+            liveViews.Remove(id);
+        }
+    }
+
+    // ---------- ECEF helpers ----------
+    // Replace these with your Cesium conversions.
+    private V3d GetECEF(Transform t)
+    {
+        // If you have CesiumGlobeAnchor on this transform:
+        // var anchor = t.GetComponent<CesiumGlobeAnchor>();
+        // return new V3d(anchor.ecefX, anchor.ecefY, anchor.ecefZ);
+
+        // Fallback: treat Unity world as ECEF-ish (OK if your world is already georeferenced)
+        Vector3 p = t.position;
+        return new V3d(p.x, p.y, p.z);
+    }
+
+    private Vector3 EcefToWorld(V3d ecef)
+    {
+        // If using CesiumGeoreference, convert ECEF -> Unity here.
+        return new Vector3((float)ecef.x, (float)ecef.y, (float)ecef.z);
+    }
+
+    // ---------- Union-Find ----------
+    private void EnsureParent(int n)
+    {
+        if (parent.Length < n) Array.Resize(ref parent, Mathf.NextPowerOfTwo(n));
+    }
+
+    private int Find(int x)
+    {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    }
+
+    private void Union(int a, int b)
+    {
+        a = Find(a); b = Find(b);
+        if (a != b) parent[b] = a;
+    }
+
+    // ---------- Data ----------
+    private struct WPoint
+    {
+        public int Id;
+        public V3d Ecef;
+        public string Type;
+        public UISymbolDisplay Display;
+    }
+
+    private struct WCluster
+    {
+        public int StableId;
+        public V3d CenterEcef;
+        public List<WPoint> Members;
+        public Dictionary<string, int> TypeCounts;
+    }
+
+    /// <summary>Simple double-precision vector for ECEF work.</summary>
+    private struct V3d
+    {
+        public double x, y, z;
+        public V3d(double x, double y, double z) { this.x = x; this.y = y; this.z = z; }
+        public static V3d zero => new V3d(0, 0, 0);
+
+        public static V3d operator +(V3d a, V3d b) => new V3d(a.x + b.x, a.y + b.y, a.z + b.z);
+        public static V3d operator -(V3d a, V3d b) => new V3d(a.x - b.x, a.y - b.y, a.z - b.z);
+        public static V3d operator *(V3d a, double d) => new V3d(a.x * d, a.y * d, a.z * d);
+        public static V3d operator /(V3d a, double d) => new V3d(a.x / d, a.y / d, a.z / d);
+
+        public double SqrMagnitude() => x * x + y * y + z * z;
+    }
+
+    // ---------- Camera height helper ----------
+    private float GetCameraHeight()
+    {
+        // If you have Cesium, replace with accurate camera height above ellipsoid/terrain.
+        return uiCamera.transform.position.magnitude;
+    }
+}
