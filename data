@@ -1,4 +1,129 @@
 
+
+private static readonly (int dx,int dy)[] Neigh8 = new (int,int)[]
+{
+    ( 1, 0), (-1, 0), (0, 1), (0,-1),
+    ( 1, 1), ( 1,-1), (-1, 1), (-1,-1)
+};
+
+private sealed class MergedComponent
+{
+    public int Key;                        // stable id = min cell key
+    public List<UISymbolDisplay> Members = new();
+    public Dictionary<string,int> TypeCounts = new();
+    public Vector2 CentroidPx;
+    public int TotalCount;
+}
+
+private List<MergedComponent> BuildCellComponents(Dictionary<int, Cell> cells, int cols, int cellPx)
+{
+    var result = new List<MergedComponent>(cells.Count);
+    var visited = new HashSet<int>();
+
+    foreach (var kv in cells)
+    {
+        int startKey = kv.Key;
+        if (visited.Contains(startKey)) continue;
+
+        var q = new Queue<int>();
+        q.Enqueue(startKey);
+        visited.Add(startKey);
+
+        int minKey = startKey;
+        var allMembers = new List<UISymbolDisplay>();
+        var typeCounts = new Dictionary<string,int>();
+        Vector2 sumCenters = Vector2.zero;
+        int centersCount = 0;
+
+        while (q.Count > 0)
+        {
+            int key = q.Dequeue();
+            var c = cells[key];
+
+            // add members
+            allMembers.AddRange(c.Members);
+            foreach (var t in c.TypeCounts)  // <-- your Cell already has TypeCounts
+            {
+                if (!typeCounts.TryGetValue(t.Key, out int cur)) cur = 0;
+                typeCounts[t.Key] = cur + t.Value;
+            }
+
+            // accumulate cell center
+            var center = new Vector2(
+                c.CellCoord.x * cellPx + cellPx * 0.5f,
+                c.CellCoord.y * cellPx + cellPx * 0.5f
+            );
+            sumCenters += center; centersCount++;
+
+            // visit neighbors
+            int gx = c.CellCoord.x, gy = c.CellCoord.y;
+            for (int i = 0; i < Neigh8.Length; i++)
+            {
+                int nx = gx + Neigh8[i].dx, ny = gy + Neigh8[i].dy;
+                if (nx < 0 || ny < 0) continue;
+                int nkey = ny * cols + nx;
+                if (!cells.ContainsKey(nkey) || visited.Contains(nkey)) continue;
+                visited.Add(nkey);
+                q.Enqueue(nkey);
+                if (nkey < minKey) minKey = nkey;
+            }
+        }
+
+        result.Add(new MergedComponent {
+            Key = minKey,
+            Members = allMembers,
+            TypeCounts = typeCounts,
+            TotalCount = allMembers.Count,
+            CentroidPx = (centersCount > 0) ? (sumCenters / centersCount) : Vector2.zero
+        });
+    }
+    return result;
+}
+
+
+-----
+// build merged groups of adjacent occupied cells
+var components = BuildCellComponents(cells, grid.Cols, grid.CellPx);
+
+HashSet<int> usedClusterKeys = HashSetPool<int>.Get();
+
+foreach (var comp in components)
+{
+    if (comp.TotalCount <= 1)
+    {
+        // single item, no cluster bubble — show individual
+        foreach (var d in comp.Members) if (d) d.HiddenUnderCluster = false;
+        HideClusterForCell(comp.Key);
+        continue;
+    }
+
+    // hide all members, show one bubble
+    foreach (var d in comp.Members) if (d) d.HiddenUnderCluster = true;
+
+    usedClusterKeys.Add(comp.Key);
+    ClusterView view = GetClusterForCell(comp.Key);
+
+    // place at merged centroid
+    RectTransformUtility.ScreenPointToLocalPointInRectangle(
+        clusterContainer, comp.CentroidPx, uiCamera, out var anchored);
+    view.Rect.anchoredPosition = anchored;
+
+    // update visuals
+    view.SetTotal(comp.TotalCount);
+    view.SetSubgroupCounts(comp.TypeCounts);
+    view.Show(true);
+}
+
+// recycle unused clusters
+RecycleUnusedClusters(usedClusterKeys);
+----
+
+
+
+
+
+
+
     foreach (var kv in cells)
     {
         var c = kv.Value;                           // your Cell { Key, CellCoord, Members, ... }
