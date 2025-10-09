@@ -1,4 +1,105 @@
+using System;
+using System.Buffers.Binary; // Required for BinaryPrimitives
+using Google.Protobuf;
 
+public class MessageParserSpan
+{
+    private const byte StartMarkerByte1 = 0x53;
+    private const byte StartMarkerByte2 = 0x56;
+    private const int PreambleSize = 8;
+
+    /// <summary>
+    /// Attempts to parse a message from a read-only span of bytes, avoiding memory allocations.
+    /// </summary>
+    /// <param name="data">The input span containing the full message.</param>
+    /// <param name="message">The output parsed message if successful.</param>
+    /// <returns>True if parsing was successful, otherwise false.</returns>
+    public bool TryParse(ReadOnlySpan<byte> data, out ParsedMessage message)
+    {
+        message = null;
+        if (data.Length < PreambleSize)
+        {
+            Console.WriteLine("Error: Data is too short to contain a preamble.");
+            return false;
+        }
+
+        try
+        {
+            // Keep a reference to the remaining part of the data buffer to "read" from
+            ReadOnlySpan<byte> buffer = data;
+
+            // STEP 1: PARSE PREAMBLE
+            // Read start marker
+            if (buffer[0] != StartMarkerByte1 || buffer[1] != StartMarkerByte2)
+            {
+                Console.WriteLine("Error: Invalid start marker.");
+                return false;
+            }
+            // Advance the buffer by "slicing" past the bytes we've read
+            buffer = buffer.Slice(2);
+
+            // Read versions
+            byte majorVersion = buffer[0];
+            byte minorVersion = buffer[1];
+            buffer = buffer.Slice(2);
+
+            // Read sizes directly from the span (LITTLE-ENDIAN)
+            ushort fullMessageSize = BinaryPrimitives.ReadUInt16LittleEndian(buffer);
+            buffer = buffer.Slice(2);
+            ushort protoHeaderSize = BinaryPrimitives.ReadUInt16LittleEndian(buffer);
+            buffer = buffer.Slice(2);
+
+            // STEP 2: VALIDATE SIZES
+            if (data.Length != fullMessageSize)
+            {
+                Console.WriteLine($"Error: Message size mismatch. Preamble reports {fullMessageSize} bytes, but buffer has {data.Length} bytes.");
+                return false;
+            }
+            
+            int payloadSize = fullMessageSize - PreambleSize - protoHeaderSize;
+            if (payloadSize < 0)
+            {
+                Console.WriteLine("Error: Invalid sizes in preamble lead to a negative payload size.");
+                return false;
+            }
+
+            // STEP 3: DESERIALIZE PROTOBUF HEADER
+            // Get a slice representing the header and parse it. No new array is created.
+            ReadOnlySpan<byte> headerSlice = buffer.Slice(0, protoHeaderSize);
+            RadioHeader header = RadioHeader.Parser.ParseFrom(headerSlice);
+
+            // Advance the buffer past the header
+            buffer = buffer.Slice(protoHeaderSize);
+            
+            // STEP 4: DESERIALIZE PROTOBUF PAYLOAD
+            // The rest of the buffer is the payload
+            ReadOnlySpan<byte> payloadSlice = buffer.Slice(0, payloadSize);
+            AutonomyMsg payload = AutonomyMsg.Parser.ParseFrom(payloadSlice);
+
+            // Success!
+            message = new ParsedMessage
+            {
+                MajorVersion = majorVersion,
+                MinorVersion = minorVersion,
+                FullMessageSize = fullMessageSize,
+                ProtoHeaderSize = protoHeaderSize,
+                Header = header,
+                Payload = payload
+            };
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"An exception occurred during parsing: {ex.Message}");
+            return false;
+        }
+    }
+}
+
+
+
+------
 using System;
 using System.IO;
 using Google.Protobuf; // Make sure to add the Google.Protobuf NuGet package
