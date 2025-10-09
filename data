@@ -1,4 +1,115 @@
 
+using System;
+using System.IO;
+using Google.Protobuf; // Make sure to add the Google.Protobuf NuGet package
+
+// Assuming you have these generated classes in your project
+// public partial class RadioHeader : IMessage<RadioHeader> { /* ... */ }
+// public partial class AutonomyMsg : IMessage<AutonomyMsg> { /* ... */ }
+
+public class MessageParser
+{
+    // The 2-byte start marker: 0x53 followed by 0x56
+    private const ushort ExpectedStartMarker = 0x5356;
+    private const int PreambleSize = 8;
+
+    /// <summary>
+    * Attempts to parse the byte array into a ParsedMessage.
+    * </summary>
+    /// <param name="data">The input byte array containing the full message.</param>
+    /// <param name="message">The output parsed message if successful.</param>
+    /// <returns>True if parsing was successful, otherwise false.</returns>
+    public bool TryParse(byte[] data, out ParsedMessage message)
+    {
+        message = null;
+        if (data == null || data.Length < PreambleSize)
+        {
+            Console.WriteLine("Error: Data is null or too short to contain a preamble.");
+            return false;
+        }
+
+        try
+        {
+            // MemoryStream and BinaryReader are great for reading structured binary data
+            using (var stream = new MemoryStream(data))
+            using (var reader = new BinaryReader(stream))
+            {
+                // STEP 1: PARSE PREAMBLE
+                ushort startMarker = ReadUInt16BigEndian(reader);
+                if (startMarker != ExpectedStartMarker)
+                {
+                    Console.WriteLine($"Error: Invalid start marker. Expected 0x{ExpectedStartMarker:X4}, got 0x{startMarker:X4}.");
+                    return false;
+                }
+
+                byte majorVersion = reader.ReadByte();
+                byte minorVersion = reader.ReadByte();
+                ushort fullMessageSize = ReadUInt16BigEndian(reader);
+                ushort protoHeaderSize = ReadUInt16BigEndian(reader);
+
+                // STEP 2: VALIDATE SIZES
+                if (data.Length != fullMessageSize)
+                {
+                    Console.WriteLine($"Error: Message size mismatch. Preamble reports {fullMessageSize} bytes, but buffer has {data.Length} bytes.");
+                    return false;
+                }
+                
+                int payloadSize = fullMessageSize - PreambleSize - protoHeaderSize;
+                if (payloadSize < 0) {
+                     Console.WriteLine("Error: Invalid sizes in preamble lead to a negative payload size.");
+                     return false;
+                }
+
+                // STEP 3: DESERIALIZE PROTOBUF HEADER
+                byte[] headerBytes = reader.ReadBytes(protoHeaderSize);
+                // Assumes your generated class is named RadioHeader
+                RadioHeader header = RadioHeader.Parser.ParseFrom(headerBytes);
+
+                // STEP 4: DESERIALIZE PROTOBUF PAYLOAD
+                byte[] payloadBytes = reader.ReadBytes(payloadSize);
+                // Assumes your generated class is named AutonomyMsg
+                AutonomyMsg payload = AutonomyMsg.Parser.ParseFrom(payloadBytes);
+
+                // Success! Assemble the final object.
+                message = new ParsedMessage
+                {
+                    MajorVersion = majorVersion,
+                    MinorVersion = minorVersion,
+                    FullMessageSize = fullMessageSize,
+                    ProtoHeaderSize = protoHeaderSize,
+                    Header = header,
+                    Payload = payload
+                };
+
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Catches errors from reading past the end of the stream or from Protobuf deserialization
+            Console.WriteLine($"An exception occurred during parsing: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Helper method to read a 2-byte unsigned short in big-endian (network) order.
+    /// </summary>
+    private ushort ReadUInt16BigEndian(BinaryReader reader)
+    {
+        // Read 2 bytes
+        byte[] bytes = reader.ReadBytes(2);
+        // If the system is little-endian (most are), reverse the bytes before converting
+        if (BitConverter.IsLittleEndian)
+        {
+            Array.Reverse(bytes);
+        }
+        return BitConverter.ToUInt16(bytes, 0);
+    }
+}
+
+
+------
 
 private static readonly (int dx,int dy)[] Neigh8 = new (int,int)[]
 {
