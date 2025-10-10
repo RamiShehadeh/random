@@ -1,3 +1,33 @@
+def _enum_value(enum_container, value_str_or_int, default=0):
+    """
+    Returns an integer enum value from a protobuf enum descriptor.
+    Handles strings (name or numeric) or ints.
+    """
+    # Numeric string or int already
+    if isinstance(value_str_or_int, int):
+        return value_str_or_int
+    s = str(value_str_or_int).strip()
+    try:
+        # Try numeric string like "1"
+        return int(s, 0)
+    except Exception:
+        pass
+
+    # Try from EnumDescriptor (protobuf 4.x upb backend)
+    try:
+        desc = enum_container.DESCRIPTOR
+        if s in desc.values_by_name:
+            return desc.values_by_name[s].number
+        # Case-insensitive fallback
+        for k, v in desc.values_by_name.items():
+            if k.lower() == s.lower():
+                return v.number
+    except Exception:
+        pass
+
+    # Last resort, 0
+    return default
+
 # gui.py
 # Minimal dark-themed Tkinter GUI for composing and sending RadioHeader + AutonomyMsg.
 # Depends only on stdlib + your existing protobuf modules.
