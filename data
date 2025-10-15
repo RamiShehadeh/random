@@ -1,3 +1,261 @@
+# gui_modern.py
+# Modern dark-themed GUI for RadioHeader & AutonomyMsg using PyQt6
+# Built to replace the Tkinter UI — same logic, cleaner visuals.
+
+import sys
+import time
+from PyQt6 import QtCore, QtGui, QtWidgets
+
+from ramis_sim.armada_socket import ArmadaSocket
+from ramis_sim.icd.armada_message_factory import ArmadaMessageFactory
+from ramis_sim.icd.gt.uav.infrastructure_pb2 import RadioHeader
+from ramis_sim.icd.gt.uav.autonomy_msg_pb2 import AutonomyMsg
+
+
+# ------------------ Helper functions ------------------ #
+
+def to_int(s, default=0):
+    try:
+        return int(str(s).strip(), 0)
+    except Exception:
+        return default
+
+
+def to_bool(v):
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def enum_value(enum_container, value_str_or_int, default=0):
+    """Resolve enum name → int via protobuf descriptor"""
+    if isinstance(value_str_or_int, int):
+        return value_str_or_int
+    s = str(value_str_or_int).strip()
+    try:
+        return int(s, 0)
+    except Exception:
+        pass
+    try:
+        desc = enum_container.DESCRIPTOR
+        if s in desc.values_by_name:
+            return desc.values_by_name[s].number
+        for k, v in desc.values_by_name.items():
+            if k.lower() == s.lower():
+                return v.number
+    except Exception:
+        pass
+    return default
+
+
+# ------------------ Main Window ------------------ #
+
+class ArmadaUI(QtWidgets.QWidget):
+    def __init__(self, options):
+        super().__init__()
+        self.socket = ArmadaSocket(options)
+        self.setWindowTitle("Armada Message Composer")
+        self.resize(820, 640)
+        self.setStyleSheet(self._dark_style())
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # ---- Header ----
+        header_box = self._group("RadioHeader")
+        layout.addWidget(header_box)
+        h_layout = QtWidgets.QGridLayout(header_box)
+
+        self.sender = self._field("Sender", "123456789", h_layout, 0, 0)
+        self.receiver = self._field("Receiver", "987654321", h_layout, 0, 1)
+
+        receiver_types = list(RadioHeader.ReceiverType.DESCRIPTOR.values_by_name.keys())
+        data_formats = list(RadioHeader.DataFormat.DESCRIPTOR.values_by_name.keys())
+
+        self.recv_type = self._combo("Recv Type", receiver_types, "RECEIVER_TYPE_SYSTEM", h_layout, 1, 0)
+        self.data_format = self._combo("Data Format", data_formats, "DATA_FORMAT_PROTOBUF3", h_layout, 1, 1)
+        self.compressed = self._checkbox("Compressed", h_layout, 2, 0)
+
+        # ---- Autonomy ----
+        auto_box = self._group("AutonomyMsg")
+        layout.addWidget(auto_box)
+        a_layout = QtWidgets.QGridLayout(auto_box)
+
+        self.domain = self._field("Domain", "gtuav", a_layout, 0, 0)
+        self.msg_type = self._field("Type", "406", a_layout, 0, 1)
+        self.msg_edit = self._textarea("Message", "hello world", a_layout, 1, 0, 1, 2)
+
+        # ---- Controls ----
+        controls = QtWidgets.QHBoxLayout()
+        layout.addLayout(controls)
+
+        self.send_btn = self._button("Send", "#00c853", controls, self.send_message)
+        controls.addStretch(1)
+        self.hz = QtWidgets.QLineEdit("0")
+        self.hz.setFixedWidth(50)
+        self.hz.setPlaceholderText("Hz")
+        controls.addWidget(QtWidgets.QLabel("Auto-send"))
+        controls.addWidget(self.hz)
+        self.auto_btn = self._button("Start", "#2979ff", controls, self.toggle_auto)
+
+        # ---- Log ----
+        log_box = self._group("Log")
+        layout.addWidget(log_box)
+        self.log = QtWidgets.QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setStyleSheet("background-color: #1c1c1c; color: #c8c8c8; border: none;")
+        vb = QtWidgets.QVBoxLayout(log_box)
+        vb.addWidget(self.log)
+
+        # Timer
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.send_message)
+
+    # ------------------ UI helpers ------------------ #
+
+    def _dark_style(self):
+        return """
+        QWidget {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: 'SF Pro Display', 'Helvetica Neue', 'Segoe UI';
+            font-size: 13px;
+        }
+        QGroupBox {
+            border: 1px solid #2c2c2c;
+            border-radius: 8px;
+            margin-top: 10px;
+            font-weight: bold;
+            padding: 8px;
+        }
+        QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+            border-radius: 6px;
+            border: 1px solid #333;
+            padding: 6px;
+        }
+        QPushButton {
+            border: none;
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-weight: 600;
+            color: white;
+        }
+        QPushButton:hover { opacity: 0.85; }
+        QLabel { color: #e0e0e0; }
+        """
+
+    def _group(self, title):
+        box = QtWidgets.QGroupBox(title)
+        return box
+
+    def _field(self, label, placeholder, layout, row, col):
+        lab = QtWidgets.QLabel(label)
+        edit = QtWidgets.QLineEdit()
+        edit.setPlaceholderText(placeholder)
+        layout.addWidget(lab, row, col * 2)
+        layout.addWidget(edit, row, col * 2 + 1)
+        return edit
+
+    def _combo(self, label, values, default, layout, row, col):
+        lab = QtWidgets.QLabel(label)
+        combo = QtWidgets.QComboBox()
+        combo.addItems(values)
+        if default in values:
+            combo.setCurrentText(default)
+        layout.addWidget(lab, row, col * 2)
+        layout.addWidget(combo, row, col * 2 + 1)
+        return combo
+
+    def _checkbox(self, label, layout, row, col):
+        chk = QtWidgets.QCheckBox(label)
+        layout.addWidget(chk, row, col * 2, 1, 2)
+        return chk
+
+    def _textarea(self, label, text, layout, row, col, rs, cs):
+        lab = QtWidgets.QLabel(label)
+        txt = QtWidgets.QTextEdit()
+        txt.setPlainText(text)
+        layout.addWidget(lab, row, col)
+        layout.addWidget(txt, row + 1, col, rs, cs)
+        return txt
+
+    def _button(self, text, color, layout, slot):
+        btn = QtWidgets.QPushButton(text)
+        btn.setStyleSheet(f"background-color: {color};")
+        btn.clicked.connect(slot)
+        layout.addWidget(btn)
+        return btn
+
+    def log_msg(self, msg):
+        timestamp = time.strftime("[%H:%M:%S]")
+        self.log.appendPlainText(f"{timestamp} {msg}")
+        self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+
+    # ------------------ Actions ------------------ #
+
+    def compose_message(self):
+        header = RadioHeader(
+            sender=to_int(self.sender.text()),
+            receiver=to_int(self.receiver.text()),
+            recv_type=enum_value(RadioHeader.ReceiverType, self.recv_type.currentText()),
+            data_format=enum_value(RadioHeader.DataFormat, self.data_format.currentText()),
+            compressed=to_bool(self.compressed.isChecked()),
+        )
+
+        msg = self.msg_edit.toPlainText().strip()
+        autonomy = AutonomyMsg(
+            msg=msg.encode("utf-8"),
+            domain=self.domain.text().strip(),
+            type=to_int(self.msg_type.text()),
+        )
+
+        packed = ArmadaMessageFactory.pack(header, autonomy)
+        return header, autonomy, packed
+
+    def send_message(self):
+        try:
+            header, autonomy, packed = self.compose_message()
+            self.socket.send(len(packed), packed)
+            self.log_msg(f"→ Sent {len(packed)} bytes | {autonomy.domain}:{autonomy.type}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Send error", str(e))
+
+    def toggle_auto(self):
+        if self.timer.isActive():
+            self.timer.stop()
+            self.auto_btn.setText("Start")
+        else:
+            try:
+                hz = float(self.hz.text())
+                if hz <= 0:
+                    QtWidgets.QMessageBox.information(self, "Auto-send", "Set frequency > 0 Hz.")
+                    return
+                period = 1000.0 / hz
+                self.timer.start(int(period))
+                self.auto_btn.setText("Stop")
+            except Exception:
+                QtWidgets.QMessageBox.warning(self, "Error", "Invalid frequency.")
+
+
+# ------------------ Entrypoint ------------------ #
+
+def launch_gui():
+    options = {
+        "local_bind_ip": "127.0.0.1",
+        "local_bind_port": 5003,
+    }
+
+    app = QtWidgets.QApplication(sys.argv)
+    window = ArmadaUI(options)
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    launch_gui()
+
+-----
 def _enum_value(enum_container, value_str_or_int, default=0):
     """
     Returns an integer enum value from a protobuf enum descriptor.
