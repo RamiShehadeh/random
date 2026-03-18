@@ -1,3 +1,262 @@
+#!/bin/bash
+
+# ============================================================
+
+# Unity Auto-Retry Build Script
+
+# Usage: ./unity_build_retry.sh [quest3 | android | (empty = both)]
+
+# ============================================================
+
+# — CONFIGURATION —————————————––
+
+UNITY_PATH=”/Applications/Unity/Hub/Editor/6000.2.0f1/Unity.app/Contents/MacOS/Unity”
+
+# Windows example: “/c/Program Files/Unity/Hub/Editor/6000.2.0f1/Editor/Unity.exe”
+
+PROJECT_PATH=”/path/to/your/unity/project”
+
+BUILD_PROFILE_QUEST3=“Assets/Settings/BuildProfiles/Quest3.asset”
+BUILD_PROFILE_ANDROID=“Assets/Settings/BuildProfiles/AndroidPhone.asset”
+
+LOG_DIR=”$(dirname “$0”)/build_logs”
+MAX_ATTEMPTS=20
+DELAY_BETWEEN_ATTEMPTS=10
+
+# — END CONFIGURATION —————————————
+
+mkdir -p “$LOG_DIR”
+
+RED=’\033[0;31m’
+GREEN=’\033[0;32m’
+YELLOW=’\033[1;33m’
+CYAN=’\033[0;36m’
+NC=’\033[0m’
+
+run_build() {
+local profile_name=”$1”
+local profile_path=”$2”
+local attempt=1
+
+```
+echo -e "\n${CYAN}========================================${NC}"
+echo -e "${CYAN} Starting build: ${profile_name}${NC}"
+echo -e "${CYAN}========================================${NC}"
+
+while [ $attempt -le $MAX_ATTEMPTS ]; do
+    local timestamp
+    timestamp=$(date +"%Y%m%d_%H%M%S")
+    local log_file="${LOG_DIR}/${profile_name}_attempt${attempt}_${timestamp}.log"
+
+    echo -e "\n${YELLOW}[Attempt $attempt / $MAX_ATTEMPTS]${NC} — $(date '+%H:%M:%S')"
+    echo -e "Log: ${log_file}"
+
+    "$UNITY_PATH" \
+        -batchmode \
+        -quit \
+        -projectPath "$PROJECT_PATH" \
+        -buildProfile "$profile_path" \
+        -logFile "$log_file"
+
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ]; then
+        echo -e "\n${GREEN}✔ BUILD SUCCEEDED${NC} — ${profile_name} (attempt $attempt)"
+        echo -e "Full log: ${log_file}"
+        return 0
+    else
+        echo -e "${RED}✘ Build failed${NC} (exit code: $exit_code)"
+
+        if [ -f "$log_file" ]; then
+            echo -e "\n--- Errors / Warnings ---"
+            grep -E "(error|Error|ERROR|warning|failed|Failed)" "$log_file" | tail -n 10
+            echo "-------------------------"
+        fi
+
+        if [ $attempt -lt $MAX_ATTEMPTS ]; then
+            echo -e "Retrying in ${DELAY_BETWEEN_ATTEMPTS}s..."
+            sleep $DELAY_BETWEEN_ATTEMPTS
+        fi
+    fi
+
+    attempt=$((attempt + 1))
+done
+
+echo -e "\n${RED}✘ BUILD FAILED after ${MAX_ATTEMPTS} attempts: ${profile_name}${NC}"
+return 1
+```
+
+}
+
+# –– MAIN ––
+
+TARGET=”${1,,}”  # lowercase first argument (empty = both)
+
+echo -e “${CYAN}Unity Auto-Retry Build — $(date)${NC}”
+echo “Project: $PROJECT_PATH”
+echo “Target:  ${TARGET:-both}”
+echo “Max attempts per build: $MAX_ATTEMPTS”
+
+quest_result=0
+android_result=0
+
+case “$TARGET” in
+quest3)
+run_build “Quest3” “$BUILD_PROFILE_QUEST3”
+quest_result=$?
+;;
+android)
+run_build “AndroidPhone” “$BUILD_PROFILE_ANDROID”
+android_result=$?
+;;
+*)
+run_build “Quest3” “$BUILD_PROFILE_QUEST3”
+quest_result=$?
+run_build “AndroidPhone” “$BUILD_PROFILE_ANDROID”
+android_result=$?
+;;
+esac
+
+echo -e “\n${CYAN}======== FINAL SUMMARY ========${NC}”
+[ “$TARGET” != “android” ] && { [ $quest_result -eq 0 ]   && echo -e “${GREEN}✔ Quest 3       — PASSED${NC}” || echo -e “${RED}✘ Quest 3       — FAILED${NC}”; }
+[ “$TARGET” != “quest3”  ] && { [ $android_result -eq 0 ] && echo -e “${GREEN}✔ Android Phone — PASSED${NC}” || echo -e “${RED}✘ Android Phone — FAILED${NC}”; }
+echo -e “${CYAN}===============================${NC}”
+
+exit $(( quest_result + android_result ))
+
+----
+// Assets/Editor/BuildRetryMenu.cs
+
+using System.Diagnostics;
+using System.IO;
+using UnityEditor;
+using UnityEngine;
+
+public static class BuildRetryMenu
+{
+    // Path to shell script, relative to project root
+    private const string ScriptRelativePath = "unity_build_retry.sh";
+
+    [MenuItem("Build/Run Auto-Retry (Both Profiles)")]
+    public static void RunBothProfiles()
+    {
+        RunScript();
+    }
+
+    [MenuItem("Build/Run Auto-Retry (Quest 3 Only)")]
+    public static void RunQuest3Only()
+    {
+        RunScript("quest3");
+    }
+
+    [MenuItem("Build/Run Auto-Retry (Android Phone Only)")]
+    public static void RunAndroidOnly()
+    {
+        RunScript("android");
+    }
+
+    private static void RunScript(string argument = "")
+    {
+        string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+        string scriptPath  = Path.Combine(projectRoot, ScriptRelativePath);
+
+        if (!File.Exists(scriptPath))
+        {
+            Debug.LogError(
+                $"[BuildRetry] Shell script not found at: {scriptPath}\n" +
+                "Check ScriptRelativePath in BuildRetryMenu.cs");
+            return;
+        }
+
+        SetExecutable(scriptPath);
+
+        Debug.Log($"[BuildRetry] Launching build script{(argument != "" ? $" ({argument})" : "")}...");
+
+#if UNITY_EDITOR_WIN
+        LaunchWindows(scriptPath, argument);
+#else
+        LaunchMacLinux(scriptPath, argument);
+#endif
+    }
+
+    private static void LaunchMacLinux(string scriptPath, string argument)
+    {
+#if UNITY_EDITOR_OSX
+        string escapedPath = scriptPath.Replace("'", "\\'");
+        string escapedArg  = argument.Replace("'", "\\'");
+        string osaScript   =
+            $"tell application \"Terminal\"\n" +
+            $"  activate\n" +
+            $"  do script \"'{escapedPath}' {escapedArg}\"\n" +
+            $"end tell";
+
+        RunProcess("osascript", $"-e '{osaScript}'");
+#else
+        // Linux — tries common terminal emulators in order
+        string[] terminals = { "gnome-terminal", "xterm", "konsole", "xfce4-terminal" };
+        string   args      = $"bash \"{scriptPath}\" {argument}";
+        bool     launched  = false;
+
+        foreach (string term in terminals)
+        {
+            try
+            {
+                RunProcess(term, $"-- bash -c \"{args}; read -p 'Press enter to close...'\"");
+                launched = true;
+                break;
+            }
+            catch { /* try next */ }
+        }
+
+        if (!launched)
+        {
+            Debug.LogWarning("[BuildRetry] No terminal emulator found — running silently. Check build_logs/ for output.");
+            RunProcess("bash", $"\"{scriptPath}\" {argument}");
+        }
+#endif
+    }
+
+    private static void LaunchWindows(string scriptPath, string argument)
+    {
+        string gitBash = @"C:\Program Files\Git\bin\bash.exe";
+
+        if (!File.Exists(gitBash))
+        {
+            Debug.LogError(
+                "[BuildRetry] Git Bash not found at default path.\n" +
+                "Install Git for Windows, or update 'gitBash' path in BuildRetryMenu.cs.");
+            return;
+        }
+
+        string args = $"--login -i -c \"\\\"{scriptPath}\\\" {argument}; read -p 'Press enter to close...'\"";
+        RunProcess("cmd.exe", $"/c start \"Unity Build Retry\" \"{gitBash}\" {args}");
+    }
+
+    private static void RunProcess(string fileName, string arguments)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName        = fileName,
+            Arguments       = arguments,
+            UseShellExecute = true,
+            CreateNoWindow  = false,
+        };
+
+        using var process = Process.Start(psi);
+        // Intentionally not waiting — editor stays responsive
+    }
+
+    private static void SetExecutable(string path)
+    {
+#if !UNITY_EDITOR_WIN
+        try { RunProcess("chmod", $"+x \"{path}\""); }
+        catch { /* non-fatal */ }
+#endif
+    }
+}
+
+
+----
 using System;
 using System.Collections.Generic;
 using UnityEngine;
