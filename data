@@ -1,3 +1,373 @@
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using UnityEditor;
+using UnityEditor.Build.Profile;
+using UnityEditor.Build.Reporting;
+using UnityEngine;
+
+public class BuildProfileLauncher : EditorWindow
+{
+    private const string ProfilesFolder = "Assets/Settings/Build Profiles";
+    private const string DefaultOutputRoot = "Builds/Android";
+
+    private readonly List<BuildProfileEntry> _profiles = new();
+    private Vector2 _scroll;
+
+    private string _outputDirectory = DefaultOutputRoot;
+    private string _apkName = "MyApp.apk";
+    private bool _appendTimestamp = true;
+    private bool _cleanBuildCache = false;
+    private bool _strictMode = false;
+
+    [MenuItem("Tools/Build Launcher")]
+    public static void Open()
+    {
+        GetWindow<BuildProfileLauncher>("Build Launcher");
+    }
+
+    private void OnEnable()
+    {
+        RefreshProfiles();
+    }
+
+    private void OnGUI()
+    {
+        DrawHeader();
+        EditorGUILayout.Space(8);
+        DrawOutputSettings();
+        EditorGUILayout.Space(8);
+        DrawProfilesList();
+    }
+
+    private void DrawHeader()
+    {
+        EditorGUILayout.LabelField("Android / Quest Build Launcher", EditorStyles.boldLabel);
+        EditorGUILayout.HelpBox(
+            "Profiles are discovered automatically from Assets/Settings/Build Profiles.\n" +
+            "Use the buttons below to switch to a profile and build it.",
+            MessageType.Info);
+
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            if (GUILayout.Button("Refresh Profiles", GUILayout.Height(24)))
+                RefreshProfiles();
+
+            if (GUILayout.Button("Open Profiles Folder", GUILayout.Height(24)))
+            {
+                var folderAsset = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(ProfilesFolder);
+                if (folderAsset != null)
+                    EditorGUIUtility.PingObject(folderAsset);
+                else
+                    Debug.LogWarning($"Folder not found: {ProfilesFolder}");
+            }
+        }
+    }
+
+    private void DrawOutputSettings()
+    {
+        EditorGUILayout.LabelField("Build Output", EditorStyles.boldLabel);
+
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            _outputDirectory = EditorGUILayout.TextField("Output Folder", _outputDirectory);
+
+            if (GUILayout.Button("Browse", GUILayout.Width(80)))
+            {
+                var chosen = EditorUtility.SaveFolderPanel(
+                    "Choose output folder",
+                    string.IsNullOrWhiteSpace(_outputDirectory) ? DefaultOutputRoot : _outputDirectory,
+                    "");
+
+                if (!string.IsNullOrWhiteSpace(chosen))
+                {
+                    // Try to store relative path when under the project, otherwise keep absolute
+                    _outputDirectory = MakeProjectRelativeOrAbsolute(chosen);
+                    Repaint();
+                }
+            }
+        }
+
+        _apkName = EditorGUILayout.TextField("APK Name", _apkName);
+        _appendTimestamp = EditorGUILayout.Toggle("Append Timestamp", _appendTimestamp);
+        _cleanBuildCache = EditorGUILayout.Toggle("Clean Build Cache", _cleanBuildCache);
+        _strictMode = EditorGUILayout.Toggle("Strict Mode", _strictMode);
+
+        EditorGUILayout.HelpBox(
+            "Example output: Builds/Android/Quest 3 - Demo 2 HMD Minimap/MyCustomName_2026-03-19_14-10-12.apk",
+            MessageType.None);
+    }
+
+    private void DrawProfilesList()
+    {
+        EditorGUILayout.LabelField("Discovered Build Profiles", EditorStyles.boldLabel);
+
+        if (_profiles.Count == 0)
+        {
+            EditorGUILayout.HelpBox(
+                $"No BuildProfile assets found under:\n{ProfilesFolder}",
+                MessageType.Warning);
+            return;
+        }
+
+        _scroll = EditorGUILayout.BeginScrollView(_scroll);
+
+        foreach (var entry in _profiles)
+        {
+            using (new EditorGUILayout.VerticalScope("box"))
+            {
+                EditorGUILayout.LabelField(entry.DisplayName, EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("Asset Path", entry.AssetPath, EditorStyles.miniLabel);
+
+                bool isActive = BuildProfile.GetActiveBuildProfile() == entry.Profile;
+                EditorGUILayout.LabelField("Active", isActive ? "Yes" : "No");
+
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button("Switch Active Profile", GUILayout.Height(28)))
+                    {
+                        SwitchActiveProfile(entry.Profile);
+                    }
+
+                    if (GUILayout.Button("Build", GUILayout.Height(28)))
+                    {
+                        BuildProfileNow(entry.Profile, entry.DisplayName);
+                    }
+
+                    if (GUILayout.Button("Build x3", GUILayout.Height(28)))
+                    {
+                        BuildProfileWithRetries(entry.Profile, entry.DisplayName, 3);
+                    }
+                }
+            }
+        }
+
+        EditorGUILayout.EndScrollView();
+    }
+
+    private void RefreshProfiles()
+    {
+        _profiles.Clear();
+
+        if (!AssetDatabase.IsValidFolder(ProfilesFolder))
+        {
+            Debug.LogWarning($"Build Profiles folder does not exist: {ProfilesFolder}");
+            return;
+        }
+
+        string[] guids = AssetDatabase.FindAssets("t:BuildProfile", new[] { ProfilesFolder });
+
+        foreach (string guid in guids)
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            var profile = AssetDatabase.LoadAssetAtPath<BuildProfile>(path);
+
+            if (profile == null)
+                continue;
+
+            _profiles.Add(new BuildProfileEntry
+            {
+                Profile = profile,
+                AssetPath = path,
+                DisplayName = profile.name
+            });
+        }
+
+        _profiles.Sort((a, b) => string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void SwitchActiveProfile(BuildProfile profile)
+    {
+        if (profile == null)
+        {
+            Debug.LogError("Cannot switch to a null profile.");
+            return;
+        }
+
+        BuildProfile.SetActiveBuildProfile(profile);
+        Debug.Log($"Active build profile set to: {profile.name}");
+    }
+
+    private void BuildProfileNow(BuildProfile profile, string displayName)
+    {
+        try
+        {
+            SwitchActiveProfile(profile);
+
+            string outputPath = BuildOutputUtility.CreateOutputPath(
+                _outputDirectory,
+                displayName,
+                _apkName,
+                _appendTimestamp);
+
+            var buildOptions = BuildOptions.None;
+
+            if (_cleanBuildCache)
+                buildOptions |= BuildOptions.CleanBuildCache;
+
+            if (_strictMode)
+                buildOptions |= BuildOptions.StrictMode;
+
+            var options = new BuildPlayerWithProfileOptions
+            {
+                buildProfile = profile,
+                locationPathName = outputPath,
+                options = buildOptions
+            };
+
+            Debug.Log($"Starting build:\nProfile: {displayName}\nOutput: {outputPath}");
+
+            BuildReport report = BuildPipeline.BuildPlayer(options);
+            BuildSummary summary = report.summary;
+
+            if (summary.result == BuildResult.Succeeded)
+            {
+                Debug.Log(
+                    $"Build succeeded.\n" +
+                    $"Profile: {displayName}\n" +
+                    $"Path: {outputPath}\n" +
+                    $"Size: {summary.totalSize} bytes\n" +
+                    $"Time: {summary.totalTime}");
+                EditorUtility.RevealInFinder(outputPath);
+                return;
+            }
+
+            Debug.LogError(
+                $"Build failed.\n" +
+                $"Profile: {displayName}\n" +
+                $"Result: {summary.result}\n" +
+                $"Output: {outputPath}");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogException(ex);
+        }
+    }
+
+    private void BuildProfileWithRetries(BuildProfile profile, string displayName, int maxAttempts)
+    {
+        if (maxAttempts < 1)
+            maxAttempts = 1;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            Debug.Log($"Build attempt {attempt}/{maxAttempts} for profile: {displayName}");
+
+            bool success = TryBuildOnce(profile, displayName);
+            if (success)
+            {
+                Debug.Log($"Build eventually succeeded on attempt {attempt}.");
+                return;
+            }
+        }
+
+        Debug.LogError($"Build failed after {maxAttempts} attempts for profile: {displayName}");
+    }
+
+    private bool TryBuildOnce(BuildProfile profile, string displayName)
+    {
+        try
+        {
+            SwitchActiveProfile(profile);
+
+            string outputPath = BuildOutputUtility.CreateOutputPath(
+                _outputDirectory,
+                displayName,
+                _apkName,
+                _appendTimestamp);
+
+            var buildOptions = BuildOptions.None;
+
+            if (_cleanBuildCache)
+                buildOptions |= BuildOptions.CleanBuildCache;
+
+            if (_strictMode)
+                buildOptions |= BuildOptions.StrictMode;
+
+            var options = new BuildPlayerWithProfileOptions
+            {
+                buildProfile = profile,
+                locationPathName = outputPath,
+                options = buildOptions
+            };
+
+            BuildReport report = BuildPipeline.BuildPlayer(options);
+            return report.summary.result == BuildResult.Succeeded;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"Attempt failed with exception:\n{ex}");
+            return false;
+        }
+    }
+
+    private static string MakeProjectRelativeOrAbsolute(string path)
+    {
+        string projectPath = Path.GetFullPath(Path.Combine(Application.dataPath, ".."))
+            .Replace('\\', '/');
+        string normalized = Path.GetFullPath(path).Replace('\\', '/');
+
+        if (normalized.StartsWith(projectPath, StringComparison.OrdinalIgnoreCase))
+        {
+            string relative = normalized.Substring(projectPath.Length).TrimStart('/');
+            return relative;
+        }
+
+        return path;
+    }
+
+    private class BuildProfileEntry
+    {
+        public BuildProfile Profile;
+        public string AssetPath;
+        public string DisplayName;
+    }
+}
+
+public static class BuildOutputUtility
+{
+    public static string CreateOutputPath(
+        string outputRoot,
+        string profileName,
+        string apkName,
+        bool appendTimestamp)
+    {
+        string safeRoot = string.IsNullOrWhiteSpace(outputRoot) ? "Builds/Android" : outputRoot;
+        string safeProfileFolder = SanitizeFolderName(profileName);
+
+        string finalApkName = string.IsNullOrWhiteSpace(apkName) ? "App.apk" : apkName.Trim();
+
+        if (!finalApkName.EndsWith(".apk", StringComparison.OrdinalIgnoreCase))
+            finalApkName += ".apk";
+
+        if (appendTimestamp)
+        {
+            string nameWithoutExt = Path.GetFileNameWithoutExtension(finalApkName);
+            string ext = Path.GetExtension(finalApkName);
+            string stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            finalApkName = $"{nameWithoutExt}_{stamp}{ext}";
+        }
+
+        string fullDir = Path.Combine(safeRoot, safeProfileFolder);
+        Directory.CreateDirectory(fullDir);
+
+        return Path.Combine(fullDir, finalApkName).Replace('\\', '/');
+    }
+
+    private static string SanitizeFolderName(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return "UnnamedProfile";
+
+        foreach (char c in Path.GetInvalidFileNameChars())
+            input = input.Replace(c, '_');
+
+        return input.Trim();
+    }
+}
+----
 param(
     [string]$UnityExe = "C:\Program Files\Unity\Hub\Editor\6000.2.0f1\Editor\Unity.exe",
     [string]$ProjectPath = "C:\Path\To\YourProject",
