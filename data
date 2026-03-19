@@ -1,3 +1,156 @@
+param(
+    [string]$UnityExe = "C:\Program Files\Unity\Hub\Editor\6000.2.0f1\Editor\Unity.exe",
+    [string]$ProjectPath = "C:\Path\To\YourProject",
+    [string]$BuildProfilePath = "Assets/Settings/Build Profiles/Quest 3 - Demo 2 HMD Minimap.asset",
+    [string]$OutputDir = "Builds/Android",
+    [string]$ApkName = "MyBuild.apk",
+    [int]$MaxRetries = 10,
+    [switch]$AppendTimestamp,
+    [switch]$CleanBuildCache,
+    [switch]$StrictMode
+)
+
+$attempt = 1
+
+while ($attempt -le $MaxRetries)
+{
+    Write-Host "========== Build attempt $attempt of $MaxRetries =========="
+
+    $args = @(
+        "-batchmode",
+        "-quit",
+        "-projectPath", $ProjectPath,
+        "-buildTarget", "Android",
+        "-activeBuildProfile", $BuildProfilePath,
+        "-executeMethod", "BuildProfileBatchBuilder.BuildFromCommandLine",
+        "-profilePath", $BuildProfilePath,
+        "-outputDir", $OutputDir,
+        "-apkName", $ApkName,
+        "-logFile", "-"
+    )
+
+    if ($AppendTimestamp) { $args += "-appendTimestamp" }
+    if ($CleanBuildCache) { $args += "-cleanBuildCache" }
+    if ($StrictMode) { $args += "-strictMode" }
+
+    & $UnityExe @args
+
+    $exitCode = $LASTEXITCODE
+    Write-Host "Unity exit code: $exitCode"
+
+    if ($exitCode -eq 0)
+    {
+        Write-Host "Build succeeded."
+        exit 0
+    }
+
+    Write-Host "Build failed. Retrying in 5 seconds..."
+    Start-Sleep -Seconds 5
+    $attempt++
+}
+
+Write-Host "Build failed after $MaxRetries attempts."
+exit 1
+
+
+------
+
+
+
+
+using System;
+using System.IO;
+using UnityEditor;
+using UnityEditor.Build.Profile;
+using UnityEditor.Build.Reporting;
+using UnityEngine;
+
+public static class BuildProfileBatchBuilder
+{
+    public static void BuildFromCommandLine()
+    {
+        string[] args = Environment.GetCommandLineArgs();
+
+        string profilePath = GetArg(args, "-profilePath", "");
+        string outputRoot = GetArg(args, "-outputDir", "Builds/Android");
+        string apkName = GetArg(args, "-apkName", "App.apk");
+        bool appendTimestamp = HasFlag(args, "-appendTimestamp");
+        bool cleanBuildCache = HasFlag(args, "-cleanBuildCache");
+        bool strictMode = HasFlag(args, "-strictMode");
+
+        BuildProfile profile = null;
+
+        // Prefer active profile, because -activeBuildProfile is the safest CLI path.
+        profile = BuildProfile.GetActiveBuildProfile();
+
+        // Fallback: load explicitly if needed.
+        if (profile == null && !string.IsNullOrWhiteSpace(profilePath))
+            profile = AssetDatabase.LoadAssetAtPath<BuildProfile>(profilePath);
+
+        if (profile == null)
+            throw new Exception(
+                "No active build profile found. Pass -activeBuildProfile <assetPath> " +
+                "and optionally -profilePath <assetPath>.");
+
+        string outputPath = BuildOutputUtility.CreateOutputPath(
+            outputRoot,
+            profile.name,
+            apkName,
+            appendTimestamp);
+
+        var buildOptions = BuildOptions.None;
+
+        if (cleanBuildCache)
+            buildOptions |= BuildOptions.CleanBuildCache;
+
+        if (strictMode)
+            buildOptions |= BuildOptions.StrictMode;
+
+        var options = new BuildPlayerWithProfileOptions
+        {
+            buildProfile = profile,
+            locationPathName = outputPath,
+            options = buildOptions
+        };
+
+        Debug.Log($"Batch build starting.\nProfile: {profile.name}\nOutput: {outputPath}");
+
+        BuildReport report = BuildPipeline.BuildPlayer(options);
+        BuildSummary summary = report.summary;
+
+        if (summary.result != BuildResult.Succeeded)
+            throw new Exception($"Build failed. Result: {summary.result}");
+
+        Debug.Log($"Build succeeded.\nPath: {outputPath}");
+    }
+
+    private static string GetArg(string[] args, string name, string fallback)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+                return args[i + 1];
+        }
+
+        return fallback;
+    }
+
+    private static bool HasFlag(string[] args, string flag)
+    {
+        foreach (string arg in args)
+        {
+            if (string.Equals(arg, flag, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+}
+
+
+
+------
+
 # gui_modern.py
 # Modern dark-themed GUI for RadioHeader & AutonomyMsg using PyQt6
 # Built to replace the Tkinter UI — same logic, cleaner visuals.
