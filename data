@@ -1,4 +1,53 @@
 
+#!/usr/bin/env bash
+
+UNITY_EXE="/c/Program Files/Unity/Hub/Editor/6000.2.0f1/Editor/Unity.exe"
+PROJECT_PATH="/c/Repos/YourProject"
+BUILD_PROFILE_PATH="Assets/Settings/Build Profiles/Quest 3 - Demo 2 HMD Minimap.asset"
+OUTPUT_DIR="Builds/Android"
+APK_NAME="Quest3_Demo2_HMD_Minimap.apk"
+MAX_RETRIES=10
+
+attempt=1
+
+while [ "$attempt" -le "$MAX_RETRIES" ]; do
+    echo "========== Build attempt $attempt of $MAX_RETRIES =========="
+
+    "$UNITY_EXE" \
+        -batchmode \
+        -quit \
+        -projectPath "$PROJECT_PATH" \
+        -buildTarget Android \
+        -activeBuildProfile "$BUILD_PROFILE_PATH" \
+        -executeMethod BuildProfileBatchBuilder.BuildFromCommandLine \
+        -profilePath "$BUILD_PROFILE_PATH" \
+        -outputDir "$OUTPUT_DIR" \
+        -apkName "$APK_NAME" \
+        -appendTimestamp \
+        -logFile -
+
+    exit_code=$?
+    echo "Unity exit code: $exit_code"
+
+    if [ "$exit_code" -eq 0 ]; then
+        echo "Build succeeded."
+        exit 0
+    fi
+
+    echo "Build failed. Retrying in 5 seconds..."
+    sleep 5
+    attempt=$((attempt + 1))
+done
+
+echo "Build failed after $MAX_RETRIES attempts."
+exit 1
+
+
+
+-----
+
+
+
 using System;
 using System.Collections.Generic;
 using System.IO;
