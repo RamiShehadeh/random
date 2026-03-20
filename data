@@ -1,6 +1,348 @@
 
 #!/usr/bin/env bash
 
+set -u
+
+# =========================
+# Config
+# =========================
+UNITY_EXE="/c/Program Files/Unity/Hub/Editor/6000.2.0f1/Editor/Unity.exe"
+PROJECT_PATH="/c/Repos/YourProject"
+BUILD_PROFILE_PATH="Assets/Settings/Build Profiles/Quest 3 - Demo 2 HMD Minimap.asset"
+OUTPUT_DIR="Builds/Android"
+APK_NAME="Quest3_Demo2_HMD_Minimap.apk"
+MAX_RETRIES=10
+APPEND_TIMESTAMP=true
+
+# Where full logs go
+LOG_ROOT="BuildLogs"
+
+# =========================
+# Colors
+# =========================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# =========================
+# Helpers
+# =========================
+print_info() {
+    echo -e "${CYAN}[INFO]${NC} $1"
+}
+
+print_step() {
+    echo -e "${BLUE}[STEP]${NC} $1"
+}
+
+print_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[FAIL]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[PASS]${NC} $1"
+}
+
+sanitize_filename() {
+    local input="$1"
+    input="${input//\\/__}"
+    input="${input//\//__}"
+    input="${input//:/-}"
+    input="${input//\?/_}"
+    input="${input//\"/_}"
+    input="${input//</_}"
+    input="${input//>/_}"
+    input="${input//|/_}"
+    echo "$input"
+}
+
+timestamp() {
+    date +"%Y-%m-%d_%H-%M-%S"
+}
+
+# =========================
+# Setup
+# =========================
+mkdir -p "$LOG_ROOT"
+
+SAFE_PROFILE_NAME="$(sanitize_filename "$BUILD_PROFILE_PATH")"
+RUN_STAMP="$(timestamp)"
+SESSION_LOG_DIR="$LOG_ROOT/$RUN_STAMP"
+mkdir -p "$SESSION_LOG_DIR"
+
+echo
+echo -e "${BOLD}========================================${NC}"
+echo -e "${BOLD} Unity Retry Build${NC}"
+echo -e "${BOLD}========================================${NC}"
+print_info "Profile: $BUILD_PROFILE_PATH"
+print_info "APK Name: $APK_NAME"
+print_info "Output Dir: $OUTPUT_DIR"
+print_info "Max Retries: $MAX_RETRIES"
+print_info "Session Log Folder: $SESSION_LOG_DIR"
+echo
+
+# =========================
+# Retry loop
+# =========================
+attempt=1
+
+while [ "$attempt" -le "$MAX_RETRIES" ]; do
+    ATTEMPT_STAMP="$(timestamp)"
+    LOG_FILE="$SESSION_LOG_DIR/build_attempt_${attempt}_${ATTEMPT_STAMP}.log"
+
+    echo -e "${BOLD}----------------------------------------${NC}"
+    print_step "Attempt $attempt of $MAX_RETRIES"
+    print_info "Writing full log to:"
+    echo "  $LOG_FILE"
+
+    UNITY_ARGS=(
+        -batchmode
+        -quit
+        -projectPath "$PROJECT_PATH"
+        -buildTarget Android
+        -activeBuildProfile "$BUILD_PROFILE_PATH"
+        -executeMethod BuildProfileBatchBuilder.BuildFromCommandLine
+        -profilePath "$BUILD_PROFILE_PATH"
+        -outputDir "$OUTPUT_DIR"
+        -apkName "$APK_NAME"
+    )
+
+    if [ "$APPEND_TIMESTAMP" = true ]; then
+        UNITY_ARGS+=(-appendTimestamp)
+    fi
+
+    # Full Unity log goes only to file
+    # stdout + stderr redirected into the log file
+    "$UNITY_EXE" "${UNITY_ARGS[@]}" >"$LOG_FILE" 2>&1
+    exit_code=$?
+
+    if [ "$exit_code" -eq 0 ]; then
+        print_success "Build succeeded on attempt $attempt"
+        print_info "Full log: $LOG_FILE"
+        echo
+        exit 0
+    fi
+
+    print_error "Build failed on attempt $attempt"
+    print_info "Full log: $LOG_FILE"
+
+    # Optional: show a tiny summary from the end of the log
+    print_warn "Last 10 log lines:"
+    tail -n 10 "$LOG_FILE"
+    echo
+
+    attempt=$((attempt + 1))
+
+    if [ "$attempt" -le "$MAX_RETRIES" ]; then
+        print_warn "Retrying in 5 seconds..."
+        sleep 5
+    fi
+done
+
+echo
+print_error "Build failed after $MAX_RETRIES attempts"
+print_info "Logs saved in: $SESSION_LOG_DIR"
+exit 1
+
+
+///::::::::::::
+
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using UnityEditor;
+using UnityEditor.Build.Profile;
+using UnityEditor.Build.Reporting;
+using UnityEngine;
+
+public class RetryBuildProfilesWindow : EditorWindow
+{
+    private const string ProfilesFolder = "Assets/Settings/Build Profiles";
+    private readonly List<BuildProfile> _profiles = new();
+
+    private Vector2 _scroll;
+    private int _maxAttempts = 3;
+    private string _outputDirectory = "Builds/Android";
+    private string _apkName = "App.apk";
+    private bool _appendTimestamp = true;
+
+    [MenuItem("Tools/Retry Build Profiles")]
+    public static void Open()
+    {
+        GetWindow<RetryBuildProfilesWindow>("Retry Build Profiles");
+    }
+
+    private void OnEnable()
+    {
+        RefreshProfiles();
+    }
+
+    private void OnGUI()
+    {
+        EditorGUILayout.LabelField("Retry Build Profiles", EditorStyles.boldLabel);
+
+        _maxAttempts = EditorGUILayout.IntField("Max Attempts", _maxAttempts);
+        _maxAttempts = Mathf.Max(1, _maxAttempts);
+
+        _outputDirectory = EditorGUILayout.TextField("Output Folder", _outputDirectory);
+        _apkName = EditorGUILayout.TextField("APK Name", _apkName);
+        _appendTimestamp = EditorGUILayout.Toggle("Append Timestamp", _appendTimestamp);
+
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            if (GUILayout.Button("Refresh Profiles"))
+                RefreshProfiles();
+
+            if (GUILayout.Button("Retry Active Profile"))
+                RetryActiveProfile();
+        }
+
+        EditorGUILayout.Space();
+
+        _scroll = EditorGUILayout.BeginScrollView(_scroll);
+
+        foreach (var profile in _profiles)
+        {
+            using (new EditorGUILayout.VerticalScope("box"))
+            {
+                EditorGUILayout.LabelField(profile.name, EditorStyles.boldLabel);
+
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button("Set Active"))
+                    {
+                        BuildProfile.SetActiveBuildProfile(profile);
+                    }
+
+                    if (GUILayout.Button($"Retry Build ({_maxAttempts}x)"))
+                    {
+                        RetryBuild(profile, _maxAttempts);
+                    }
+                }
+            }
+        }
+
+        EditorGUILayout.EndScrollView();
+    }
+
+    private void RefreshProfiles()
+    {
+        _profiles.Clear();
+
+        string[] guids = AssetDatabase.FindAssets("t:BuildProfile", new[] { ProfilesFolder });
+
+        foreach (string guid in guids)
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            var profile = AssetDatabase.LoadAssetAtPath<BuildProfile>(path);
+            if (profile != null)
+                _profiles.Add(profile);
+        }
+
+        _profiles.Sort((a, b) => string.Compare(a.name, b.name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void RetryActiveProfile()
+    {
+        var active = BuildProfile.GetActiveBuildProfile();
+        if (active == null)
+        {
+            Debug.LogError("No active build profile found.");
+            return;
+        }
+
+        RetryBuild(active, _maxAttempts);
+    }
+
+    private void RetryBuild(BuildProfile profile, int maxAttempts)
+    {
+        if (profile == null)
+        {
+            Debug.LogError("Profile is null.");
+            return;
+        }
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            Debug.Log($"Attempt {attempt}/{maxAttempts} for profile: {profile.name}");
+
+            if (TryBuild(profile))
+            {
+                Debug.Log($"Build succeeded on attempt {attempt} for profile: {profile.name}");
+                return;
+            }
+        }
+
+        Debug.LogError($"Build failed after {maxAttempts} attempts for profile: {profile.name}");
+    }
+
+    private bool TryBuild(BuildProfile profile)
+    {
+        try
+        {
+            BuildProfile.SetActiveBuildProfile(profile);
+
+            string outputPath = CreateOutputPath(_outputDirectory, profile.name, _apkName, _appendTimestamp);
+
+            var options = new BuildPlayerWithProfileOptions
+            {
+                buildProfile = profile,
+                locationPathName = outputPath,
+                options = BuildOptions.None
+            };
+
+            BuildReport report = BuildPipeline.BuildPlayer(options);
+            return report.summary.result == BuildResult.Succeeded;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"Build exception for {profile.name}: {ex}");
+            return false;
+        }
+    }
+
+    private static string CreateOutputPath(string outputRoot, string profileName, string apkName, bool appendTimestamp)
+    {
+        if (string.IsNullOrWhiteSpace(outputRoot))
+            outputRoot = "Builds/Android";
+
+        if (string.IsNullOrWhiteSpace(apkName))
+            apkName = "App.apk";
+
+        if (!apkName.EndsWith(".apk", StringComparison.OrdinalIgnoreCase))
+            apkName += ".apk";
+
+        if (appendTimestamp)
+        {
+            string baseName = Path.GetFileNameWithoutExtension(apkName);
+            string ext = Path.GetExtension(apkName);
+            string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            apkName = $"{baseName}_{timestamp}{ext}";
+        }
+
+        string safeProfileName = string.Join("_", profileName.Split(Path.GetInvalidFileNameChars()));
+        string folder = Path.Combine(outputRoot, safeProfileName);
+        Directory.CreateDirectory(folder);
+
+        return Path.Combine(folder, apkName).Replace('\\', '/');
+    }
+}
+
+
+
+-----
+#!/usr/bin/env bash
+
 UNITY_EXE="/c/Program Files/Unity/Hub/Editor/6000.2.0f1/Editor/Unity.exe"
 PROJECT_PATH="/c/Repos/YourProject"
 BUILD_PROFILE_PATH="Assets/Settings/Build Profiles/Quest 3 - Demo 2 HMD Minimap.asset"
